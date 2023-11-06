@@ -1,0 +1,34 @@
+[package]
+name = "axial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrayvec = "0.7"
+noise = "0.8"
+rand = "0.8"
+ron = "0.8"
+wgpu = { git = "https://github.com/gfx-rs/wgpu" }
+winit = "0.29"
+zorder = "0.1"
+
+[dependencies.bytemuck]
+version = "1.14"
+features = [ "derive" ]
+
+[dependencies.glam]
+version = "0.24"
+features = [ "bytemuck", "serde", "rand" ]
+
+[dependencies.image]
+version = "0.24"
+default-features = false
+features = [ "png" ]
+
+[dependencies.pollster]
+version = "0.3"
+features = [ "macro" ]
+
+[dependencies.serde]
+version = "1.0"
+features = [ "derive" ]

@@ -1,0 +1,23 @@
+(
+
+hides: (
+    west: true,
+    east: true,
+    south: true,
+    north: true,
+    down: true,
+    up: true,
+),
+
+parts: [
+    Cuboid({
+        west: (tile: "stone"),
+        east: (tile: "stone"),
+        south: (tile: "stone"),
+        north: (tile: "stone"),
+        down: (tile: "stone"),
+        up: (tile: "stone"),
+    }),
+],
+
+)
