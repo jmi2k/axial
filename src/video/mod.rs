@@ -33,7 +33,7 @@ impl Gfx {
 
         let descriptor = DeviceDescriptor {
             label: None,
-            features: Features::PUSH_CONSTANTS,
+            features: Features::PUSH_CONSTANTS | Features::POLYGON_MODE_LINE,
             limits,
         };
 

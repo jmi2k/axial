@@ -92,7 +92,7 @@ fn open_tiles(root: &Path) -> (Vec<[RgbaImage; MIP_LEVELS]>, Vec<PathBuf>) {
     let mut tiles = vec![];
     names.sort_unstable();
 
-    for (idx, name) in names.iter_mut().enumerate() {
+    for name in names.iter_mut() {
         let path = root.join(&name);
         name.set_extension("");
 

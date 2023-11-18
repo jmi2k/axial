@@ -9,6 +9,7 @@ hides: (
     up: false,
 ),
 
+// jmi2k: clip rects to match texture
 parts: [
     Rect({
         o: (0.25, 0, 0),

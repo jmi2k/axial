@@ -1,4 +1,4 @@
-use std::{array, collections::HashMap, f32::consts::PI, iter, mem, time::Instant};
+use std::{array, collections::HashMap, f32::consts::PI, iter, mem, time::Instant, num::NonZeroU64};
 
 use glam::{IVec3, Mat4};
 use image::RgbaImage;
@@ -16,17 +16,16 @@ use wgpu::{
     RenderPipelineDescriptor, Sampler, SamplerDescriptor, ShaderStages, StencilState, StoreOp,
     SurfaceConfiguration, SurfaceTexture, Texture, TextureAspect, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
+    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode,
 };
 
-use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::SideMap};
+use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, DirMap}};
 
 use super::Gfx;
 
 const FOV: f32 = 90. * PI / 180.;
 const ZNEAR: f32 = 1e-2;
 const ZFAR: f32 = 1e4;
-const MAX_DISTANCE: u32 = 512;
 
 const VERTEX_LAYOUT: VertexBufferLayout<'static> = {
     let attributes = &vertex_attr_array! {
@@ -87,7 +86,7 @@ pub type VertexRef = u64;
 pub type QuadRef = [VertexRef; 6];
 
 struct GpuMesh {
-    nonces: SideMap<Option<u64>>,
+    nonces: SideMap<Option<NonZeroU64>>,
     vertex_buf: Buffer,
     disposable: bool,
 }
@@ -102,7 +101,8 @@ pub struct Renderer {
     pack_group: BindGroup,
     frame_layout: BindGroupLayout,
     frame_group: BindGroup,
-    chunk_pipeline: RenderPipeline,
+    poly_chunk_pipeline: RenderPipeline,
+    wire_chunk_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
     loaded_meshes: HashMap<IVec3, GpuMesh>,
 }
@@ -122,7 +122,7 @@ impl Renderer {
         let pack_layout = ctx.device.create_bind_group_layout(&pack_descriptor);
         let frame_layout = ctx.device.create_bind_group_layout(&frame_descriptor);
 
-        let chunk_pipeline = {
+        let (poly_chunk_pipeline, wire_chunk_pipeline) = {
             let shader = ctx
                 .device
                 .create_shader_module(include_wgsl!("wgsl/chunk.wgsl"));
@@ -141,11 +141,19 @@ impl Renderer {
 
             let layout = ctx.device.create_pipeline_layout(&layout_desc);
 
-            let primitive = PrimitiveState {
+            let poly_primitive = PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
                 cull_mode: Some(Face::Back),
                 front_face: FrontFace::Ccw,
                 polygon_mode: PolygonMode::Fill,
+                ..PrimitiveState::default()
+            };
+
+            let wire_primitive = PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                cull_mode: Some(Face::Back),
+                front_face: FrontFace::Ccw,
+                polygon_mode: PolygonMode::Line,
                 ..PrimitiveState::default()
             };
 
@@ -175,10 +183,21 @@ impl Renderer {
                 bias: DepthBiasState::default(),
             };
 
-            let pipeline_desc = RenderPipelineDescriptor {
+            let poly_pipeline_desc = RenderPipelineDescriptor {
                 label: None,
                 layout: Some(&layout),
-                primitive,
+                primitive: poly_primitive,
+                vertex: vertex.clone(),
+                fragment: Some(fragment.clone()),
+                depth_stencil: Some(depth_stencil.clone()),
+                multisample: MultisampleState::default(),
+                multiview: None,
+            };
+
+            let wire_pipeline_desc = RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                primitive: wire_primitive,
                 vertex,
                 fragment: Some(fragment),
                 depth_stencil: Some(depth_stencil),
@@ -186,7 +205,10 @@ impl Renderer {
                 multiview: None,
             };
 
-            ctx.device.create_render_pipeline(&pipeline_desc)
+            let poly_pipeline = ctx.device.create_render_pipeline(&poly_pipeline_desc);
+            let wire_pipeline = ctx.device.create_render_pipeline(&wire_pipeline_desc);
+
+            (poly_pipeline, wire_pipeline)
         };
 
         let post_pipeline = {
@@ -242,6 +264,8 @@ impl Renderer {
         let sampler_descriptor = SamplerDescriptor {
             min_filter: FilterMode::Linear,
             mipmap_filter: FilterMode::Linear,
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
             ..SamplerDescriptor::default()
         };
 
@@ -260,7 +284,8 @@ impl Renderer {
             pack_group,
             frame_layout,
             frame_group,
-            chunk_pipeline,
+            poly_chunk_pipeline,
+            wire_chunk_pipeline,
             post_pipeline,
             loaded_meshes: HashMap::default(),
         }
@@ -272,7 +297,7 @@ impl Renderer {
     }
 
     // jmi2k: accept a closure instead?
-    pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<u64>>, quads: &[QuadRef]) {
+    pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef]) {
         match self.loaded_meshes.get(&location) {
             Some(entry) if &entry.nonces == nonces => return,
             _ => {}
@@ -299,14 +324,14 @@ impl Renderer {
         self.loaded_meshes.insert(location, entry);
     }
 
-    pub fn has_mesh(&self, location: IVec3, nonces: &SideMap<Option<u64>>) -> bool {
+    pub fn has_mesh(&self, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>) -> bool {
         self.loaded_meshes
             .get(&location)
             .map(|entry| &entry.nonces == nonces)
             .unwrap_or_default()
     }
 
-    fn render_chunks(&mut self, encoder: &mut CommandEncoder, world: &World, pov: &Pov) {
+    fn render_chunks(&mut self, encoder: &mut CommandEncoder, world: &World, pov: &Pov, max_distance: usize, wireframe: bool) {
         let frame_view = self.frame.create_view(&TextureViewDescriptor::default());
         let depth_view = self.depth.create_view(&TextureViewDescriptor::default());
 
@@ -346,8 +371,10 @@ impl Renderer {
         let unxform = projection.inverse();
         let time = /* jmi2k: (world.time % TICKS_PER_DAY) as u32 */ 0u32;
 
+        let pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.poly_chunk_pipeline };
+
         let mut pass = encoder.begin_render_pass(&descriptor);
-        pass.set_pipeline(&self.chunk_pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.pack_group, &[]);
 
         for (location, mesh) in &mut self.loaded_meshes {
@@ -362,8 +389,9 @@ impl Renderer {
             pass.set_vertex_buffer(0, vertex_buf.slice(..));
             pass.draw(0..num_vertices as _, 0..1);
 
-            let distance_sq = location.as_vec3().distance_squared(pov.position);
-            mesh.disposable = distance_sq > (MAX_DISTANCE * MAX_DISTANCE) as f32;
+            let max_distance = (max_distance * 32) as f32;
+            let distance = location.as_vec3().distance(pov.position);
+            mesh.disposable = distance > max_distance;
         }
     }
 
@@ -397,7 +425,7 @@ impl Renderer {
         pass.draw(0..3, 0..1);
     }
 
-    pub fn render(&mut self, ctx: &Gfx, world: &World, pov: &Pov) {
+    pub fn render(&mut self, ctx: &Gfx, world: &World, pov: &Pov, max_distance: usize, wireframe: bool) {
         let SurfaceConfiguration { width, height, .. } = ctx.config;
         let output = ctx.surface.get_current_texture().unwrap();
 
@@ -414,7 +442,7 @@ impl Renderer {
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
-        self.render_chunks(&mut encoder, world, pov);
+        self.render_chunks(&mut encoder, world, pov, max_distance, wireframe);
         self.render_post(&mut encoder, &output);
 
         ctx.queue.submit(iter::once(encoder.finish()));
@@ -429,8 +457,17 @@ pub fn quad_ref(base: usize, location: IVec3, sky_exposure: u8) -> QuadRef {
     array::from_fn(|idx| vertex_ref(4 * base + offsets[idx], location, sky_exposure))
 }
 
+pub fn extend_quad_ref(quad_ref: &mut QuadRef, increment: IVec3) {
+    for idx in [1, 3, 5] {
+        quad_ref[idx] += 1 << 52
+            | (increment.x as u64) << 32
+            | (increment.y as u64) << 37
+            | (increment.z as u64) << 42
+    }
+}
+
 fn vertex_ref(offset: usize, location: IVec3, sky_exposure: u8) -> VertexRef {
-    debug_assert!(sky_exposure < 16, "sky exposure level out of bounds");
+    debug_assert!(sky_exposure < 16, "sky exposure out of bounds");
 
     let location = chunk::mask_block_loc(location);
     let sky_exposure = sky_exposure & 15;
@@ -439,7 +476,7 @@ fn vertex_ref(offset: usize, location: IVec3, sky_exposure: u8) -> VertexRef {
         | (location.x as u64) << 32
         | (location.y as u64) << 37
         | (location.z as u64) << 42
-        | (sky_exposure as u64) << 47
+        | (sky_exposure as u64) << 48
 }
 
 fn build_frames(ctx: &Gfx) -> (Texture, Texture) {

@@ -16,7 +16,7 @@ impl World {
     pub fn new() -> Self {
         Self {
             next_tick: AtomicU64::default(),
-            loaded_chunks: HashMap::default(),
+            loaded_chunks: HashMap::with_capacity(16 * 16 * 16),
         }
     }
 

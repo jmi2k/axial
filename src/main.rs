@@ -44,11 +44,12 @@ use world::World;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
-const BINDINGS: [(Input, Action); 19] = [
+const BINDINGS: [(Input, Action); 20] = [
     (Input::Motion,                      Action::Turn),
     (Input::Close,                       Action::Exit),
     (Input::Press(KeyCode::Escape),      Action::Exit),
     (Input::Press(KeyCode::KeyQ),        Action::Exit),
+    (Input::Press(KeyCode::KeyF),        Action::Debug("toggle wireframe")),
     (Input::Press(KeyCode::KeyE),        Action::Debug("reload packs")),
     (Input::Press(KeyCode::Backquote),   Action::Debug("switch packs")),
     (Input::Press(KeyCode::Tab),         Action::Fullscreen),
@@ -79,32 +80,44 @@ async fn main() {
         .build(&event_loop)
         .unwrap();
 
+    const MAX_DISTANCE: usize = 12;
+    let mut pov = Pov::default();
+    let mut walks = DirMap::default();
+
     let mut gfx = Gfx::new(&window).await;
     window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
     window.set_cursor_visible(false);
 
     let mut renderer = Renderer::new(&gfx, &pack);
-    let mut world = World::new();
-    let mut pov = Pov::default();
-
     let mut redraw = false;
+    let mut wireframe = false;
+    let mut world = World::new();
+
     let mut then = Instant::now();
     let mut accrued_time = Duration::ZERO;
-    let mut walks = DirMap::default();
 
     // jmi2k: crap
     #[allow(clippy::unusual_byte_groupings, reason = "digits form words")]
     let terraformer = Terraformer::new(0xA11_1DEA5_FA11_DEAD);
     let mut mesh = vec![];
-    let mut runtime = Duration::ZERO;
-    let mut frames = 0;
     let mut generating = HashSet::new();
-    let distance = 8;
+
+    // let mut generating = HashSet::<IVec3>::new();
+    // {
+    //     let mut chunk = chunk::Chunk::new();
+    //     for z in 0..3 {
+    //     for y in 0..3 {
+    //     for x in 0..3 {
+    //         chunk.place(IVec3 { x, y, z }, 2);
+    //     }
+    //     }
+    //     }
+    //     world.load(IVec3::NEG_Z, chunk);
+    // }
 
     let _ = event_loop.run(move |event, target| {
         match event_handler.handle(event) {
             Action::Exit => {
-                eprintln!("{} fps", 1_000_000 * frames / runtime.as_micros());
                 target.exit();
             }
 
@@ -139,6 +152,10 @@ async fn main() {
                 gfx.resize_viewport(new_size);
             }
 
+            Action::Debug("toggle wireframe") => {
+                wireframe = !wireframe;
+            }
+
             Action::Debug("reload packs") => {
                 (pack, alt_pack) = open_packs();
                 renderer.update_pack(&gfx, &pack);
@@ -154,7 +171,6 @@ async fn main() {
 
         let now = Instant::now();
         accrued_time += now - then;
-        runtime += now - then;
         then = now;
 
         // jmi2k: crap
@@ -162,18 +178,25 @@ async fn main() {
         let (chunk_loc, _) = chunk::split_loc(pov.position.as_ivec3());
         let IVec3 { x, y, z } = chunk_loc;
 
-        if let Ok((location, chunk)) = terraformer.chunk_rx().try_recv() {
+        while let Ok((location, chunk)) = terraformer.chunk_rx().try_recv() {
             world.load(location, chunk);
             generating.remove(&location);
         }
 
+        let max_distance = MAX_DISTANCE as i32;
+
+        {
+        optick::event!("tick drain");
+
+        // jmi2k: this takes too long
         while accrued_time >= TICK_DURATION {
             #[rustfmt::skip]
-            for k in z - distance .. z + distance {
-            for j in y - distance .. y + distance {
-            for i in x - distance .. x + distance {
+            for k in z - max_distance .. z + max_distance {
+            for j in y - max_distance .. y + max_distance {
+            for i in x - max_distance .. x + max_distance {
                 let chunk_loc = IVec3::new(i, j, k);
 
+                // jmi2k: this eats ~10ms at MAX_DISTANCE = 24, maybe optimize conditions? caching?
                 if world.chunk(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
                     terraformer.terraform(chunk_loc);
                     generating.insert(chunk_loc);
@@ -184,9 +207,16 @@ async fn main() {
 
             // jmi2k: moar crap
             pov.position += aim * 1.;
+            // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
+            let time = world.tick();
 
-            world.tick();
+            if time % 64 == 0 {
+                eprintln!("position: {:?}", pov.position.as_ivec3());
+            }
+
             accrued_time -= TICK_DURATION;
+        }
+
         }
 
         if !redraw {
@@ -196,22 +226,41 @@ async fn main() {
         // jmi2k: crap crap crap
 
         let models = [ 
-            pack.model("grass").unwrap(),
-            pack.model("dirt").unwrap(),
-            pack.model("stone").unwrap(),
-            pack.model("wheat_0").unwrap(),
-            pack.model("wheat").unwrap(),
+            None,
+            pack.model("grass"),
+            pack.model("dirt"),
+            pack.model("stone"),
+            pack.model("wheat_0"),
+            pack.model("wheat"),
         ];
 
-        #[rustfmt::skip]
-        for k in z - distance .. z + distance {
-        for j in y - distance .. y + distance {
-        for i in x - distance .. x + distance {
-            let chunk_loc = IVec3::new(i, j, k);
+        let then = Instant::now();
 
+        #[rustfmt::skip]
+        'mesh:
+        for k in (z - max_distance .. z + max_distance).rev() {
+        for j in y - max_distance .. y + max_distance {
+        for i in x - max_distance .. x + max_distance {
+            let chunk_loc = IVec3::new(i, j, k);
+            let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
+            let distance = pov.position.distance(fine_loc.as_vec3());
+            let max_distance = MAX_DISTANCE as f32 * 32.;
+
+            // Early continue if there is no chunk
             let Some(chunk) = world.chunk(chunk_loc) else {
                 continue;
             };
+
+            // Unload far away chunks
+            if distance > max_distance {
+                world.unload(chunk_loc);
+                continue;
+            }
+
+            // Discard empty chunks immediately
+            if chunk.num_blocks() == 0 {
+                continue;
+            }
 
             let neighbor_chunks = DirMap {
                 west: world.chunk(chunk_loc - IVec3::X),
@@ -232,50 +281,109 @@ async fn main() {
                 none: Some(chunk.nonces().none),
             };
 
+            // Discard already meshed chunks immediately
             if renderer.has_mesh(chunk_loc, &neighborhood_nonces) { continue; }
+
+            // Discard enclosed chunks immediately
+            // jmi2k: can be improved, and also must take into account whether the player is inside
+            if neighbor_chunks.west.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+                && neighbor_chunks.east.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+                && neighbor_chunks.south.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+                && neighbor_chunks.north.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+                && neighbor_chunks.down.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+                && neighbor_chunks.up.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+            {
+                renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &[]);
+                continue;
+            }
+
             mesh.clear();
 
-            for z in 0..32 {
-            for y in 0..32 {
-            for x in 0..32 {
-                let block_loc = IVec3 { x, y, z };
-                let block = chunk[block_loc];
-
-                if chunk[block_loc] == 0 {
-                    continue;
-                }
-
-                let block_neighbors = DirMap {
-                    west: if x == 0 { neighbor_chunks.west.map(|chunk| chunk[block_loc + 31 * IVec3::X]).unwrap_or(0) } else { chunk[block_loc - IVec3::X] },
-                    east: if x == 31 { neighbor_chunks.east.map(|chunk| chunk[block_loc - 31 * IVec3::X]).unwrap_or(0) } else { chunk[block_loc + IVec3::X] },
-                    south: if y == 0 { neighbor_chunks.south.map(|chunk| chunk[block_loc + 31 * IVec3::Y]).unwrap_or(0) } else { chunk[block_loc - IVec3::Y] },
-                    north: if y == 31 { neighbor_chunks.north.map(|chunk| chunk[block_loc - 31 * IVec3::Y]).unwrap_or(0) } else { chunk[block_loc + IVec3::Y] },
-                    down: if z == 0 { neighbor_chunks.down.map(|chunk| chunk[block_loc + 31 * IVec3::Z]).unwrap_or(0) } else { chunk[block_loc - IVec3::Z] },
-                    up: if z == 31 { neighbor_chunks.up.map(|chunk| chunk[block_loc - 31 * IVec3::Z]).unwrap_or(0) } else { chunk[block_loc + IVec3::Z] },
+            for side in SIDES {
+                #[rustfmt::skip]
+                let (Δlayer, Δrow, Δblock) = match side {
+                    Some(Direction::West) =>  (IVec3::X, IVec3::Y, IVec3::Z),
+                    Some(Direction::East) =>  (IVec3::X, IVec3::Z, IVec3::Y),
+                    Some(Direction::South) => (IVec3::Y, IVec3::Z, IVec3::X),
+                    Some(Direction::North) => (IVec3::Y, IVec3::X, IVec3::Z),
+                    Some(Direction::Down) =>  (IVec3::Z, IVec3::X, IVec3::Y),
+                    Some(Direction::Up) =>    (IVec3::Z, IVec3::Y, IVec3::X),
+                    None =>                   (IVec3::Z, IVec3::Y, IVec3::X),
                 };
 
-                for side in SIDES {
-                    if side.map(|direction| (1..=3).contains(&block_neighbors[direction])).unwrap_or(false) {
+                for a in 0..32 {
+                for b in 0..32 {
+                    let mut last_face = None;
+                for c in 0..32 {
+                    // Traverse chunk following the current side's canonical order
+                    let block_loc = a * Δlayer + b * Δrow + c * Δblock;
+                    let block = chunk[block_loc];
+
+                    // Skip invisible blocks
+                    let Some(model) = models[block as usize] else {
+                        last_face = None;
+                        continue;
+                    };
+
+                    // Skip empty faces
+                    let Some(range) = model.ranges[side].as_ref() else {
+                        last_face = None;
+                        continue;
+                    };
+
+                    // jmi2k: ugly...
+                    let culled = 'here: {
+                        let Some(direction) = side else {
+                            break 'here false;
+                        };
+
+                        let neighbor_loc = block_loc + IVec3::from(direction);
+                        let block_loc = chunk::mask_block_loc(neighbor_loc);
+
+                        let neighbor = match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
+                            (-1, _) | (_, 32) => neighbor_chunks[direction].map(|chunk| chunk[block_loc]).unwrap_or(0),
+                            _ => chunk[block_loc],
+                        };
+
+                        (1..=3).contains(&neighbor)
+                    };
+
+                    // Skip hidden faces
+                    if culled {
+                        last_face = None;
                         continue;
                     }
 
-                    let range = models[block as usize - 1].ranges[side].as_ref();
+                    for idx in range.clone() {
+                        let sky_exposure = 15;
 
-                    if range.is_none() {
-                        continue;
-                    }
-
-                    for idx in range.unwrap().clone() {
-                        let sky_exposure = 0xF;
-                        let quad_ref = render::quad_ref(idx, block_loc, sky_exposure);
-                        mesh.push(quad_ref);
+                        // Simple inline 1D greedy meshing.
+                        //
+                        // This code will fail to optimize sides with more than 1 quad,
+                        // but this is an acceptable limitation
+                        // as those should not be optimized anyway.
+                        //
+                        // The face extension is done at the reference level.
+                        // This is possible because the faces are canonicalized.
+                        if last_face == Some((idx, sky_exposure)) {
+                            let quad_ref = mesh.last_mut().unwrap();
+                            render::extend_quad_ref(quad_ref, Δblock);
+                        } else {
+                            let quad_ref = render::quad_ref(idx, block_loc, sky_exposure);
+                            mesh.push(quad_ref);
+                            last_face = Some((idx, sky_exposure));
+                        }
                     }
                 }
-            }
-            }
+                }
+                }
             }
 
             renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &mesh);
+
+            if then.elapsed() > Duration::from_micros(1500) {
+                break 'mesh;
+            }
         }
         }
         }
@@ -286,8 +394,8 @@ async fn main() {
             ..pov
         };
 
-        renderer.render(&gfx, &world, &pov_interpolated);
-        frames += 1;
+        renderer.render(&gfx, &world, &pov_interpolated, MAX_DISTANCE, wireframe);
+        optick::next_frame();
         redraw = false;
     });
 }

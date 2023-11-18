@@ -156,12 +156,43 @@ fn desugar_rect(
         .binary_search_by_key(&tile, PathBuf::as_path)
         .unwrap() as u32;
 
-    let quad = [
+    let vertices = [
         Vertex::new(oo, _v, normal, idx),
         Vertex::new(x_, uv, normal, idx),
         Vertex::new(_y, pp, normal, idx),
         Vertex::new(xy, u_, normal, idx),
     ];
 
+    let quad = normalize_quad(vertices, normal);
     (cull, quad)
+}
+
+fn normalize_quad(mut vertices: Quad, normal: Vec3) -> Quad {
+    // jmi2k: enforce canonical ordering in position
+    // jmi2k: enforce canonical ordering in UV (signs)
+
+    // hacks to make the solid cube work for testing purposes
+    if normal.x != 0. && normal.y != 0. && normal.z != 0. {
+        return vertices;
+    }
+
+    if normal.x < 0. || normal.y > 0. {
+        let [a, b, c, d] = vertices;
+        return [b, d, a, c];
+    }
+
+    if normal.z < 0. {
+        let [a, b, c, d] = vertices;
+        return [c, a, d, b];
+    }
+
+    match normal.to_array() {
+        [x, 0., 0.] if x < 0. => vertices,
+        [x, 0., 0.] if x > 0. => vertices,
+        [0., y, 0.] if y < 0. => vertices,
+        [0., y, 0.] if y > 0. => vertices,
+        [0., 0., z] if z < 0. => vertices,
+        [0., 0., z] if z > 0. => vertices,
+        [_, _, _] => vertices,
+    }
 }

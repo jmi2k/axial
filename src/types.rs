@@ -6,6 +6,15 @@ use std::{
 use glam::IVec3;
 use serde::Deserialize;
 
+pub const DIRECTIONS: [Direction; mem::variant_count::<Direction>()] = [
+    Direction::West,
+    Direction::East,
+    Direction::South,
+    Direction::North,
+    Direction::Down,
+    Direction::Up,
+];
+
 pub const SIDES: [Side; mem::variant_count::<Direction>() + 1] = [
     Some(Direction::West),
     Some(Direction::East),

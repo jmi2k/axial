@@ -1,16 +1,17 @@
 use std::{
     ops::Index,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering}, num::NonZeroU64,
 };
 
 use glam::IVec3;
 
 use crate::types::{Cube, SideMap};
 
-static NONCE: AtomicU64 = AtomicU64::new(0);
+static NONCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct Chunk {
-    nonces: SideMap<u64>,
+    nonces: SideMap<NonZeroU64>,
+    num_blocks: u16,
     indices: Box<Cube<i16, 32>>,
 }
 
@@ -49,8 +50,12 @@ impl Chunk {
         }
     }
 
-    pub fn nonces(&self) -> &SideMap<u64> {
+    pub fn nonces(&self) -> &SideMap<NonZeroU64> {
         &self.nonces
+    }
+
+    pub fn num_blocks(&self) -> u16 {
+        self.num_blocks
     }
 
     pub fn new() -> Self {
@@ -61,18 +66,25 @@ impl Chunk {
 
         Self {
             nonces: SideMap::from_fn(|_| fresh_nonce()),
+            num_blocks: 0,
             indices,
         }
     }
 
     pub fn place(&mut self, location: IVec3, block: i16) {
+        let last_block = self[location];
         *self.block_mut(location) = block;
+
         self.update_nonces(location);
+        self.num_blocks += (last_block != 0) as u16 - (block != 0) as u16;
     }
 
     pub fn destroy(&mut self, location: IVec3) {
+        let last_block = self[location];
         *self.block_mut(location) = 0;
+
         self.update_nonces(location);
+        self.num_blocks -= (last_block != 0) as u16;
     }
 
     // jmi2k: should it have access to the world? I think so
@@ -135,6 +147,15 @@ pub fn merge_loc(chunk_loc: IVec3, block_loc: IVec3) -> IVec3 {
     chunk_loc << 5 | block_loc
 }
 
-fn fresh_nonce() -> u64 {
-    NONCE.fetch_add(1, Ordering::Relaxed)
+fn fresh_nonce() -> NonZeroU64 {
+    let value = NONCE.fetch_add(1, Ordering::Relaxed);
+
+    unsafe {
+        // This is actually unsafe!
+        // It will cause undefined behavior when NONCE rolls over.
+        // If a value were to be generated every nanosecond,
+        // it would take ~584 years to roll the counter over.
+        // Let's just embrace the danger...
+        NonZeroU64::new_unchecked(value)
+    }
 }

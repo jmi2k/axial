@@ -58,18 +58,24 @@ fn vert_main(
     let x = extractBits(blob, 0u, 5u);
     let y = extractBits(blob, 5u, 5u);
     let z = extractBits(blob, 10u, 5u);
-    let sky_exposure = extractBits(blob, 15u, 8u);
+    _ = extractBits(blob, 15u, 1u);
+    let sky_exposure = extractBits(blob, 16u, 4u);
+    let num_copies = extractBits(blob, 20u, 5u);
     let block_loc = vec3f(vec3u(x, y, z));
+    let tile = va.tile;
 
+    // jmi2k: suspicious of precision problems
     let position = vec3f(va.x, va.y, va.z) + block_loc + vec3f(p.location);
     let shade = max(0., dot(vec3f(abs(va.nx), abs(va.ny), va.nz), vec3f(0.5, 0.3, -0.6)));
+    // jmi2k: this doesn't work apparently
+    let mapping = vec2f(va.u + f32(num_copies), va.v);
 
     return V2F(
         p.xform * vec4f(position, 1.),
-        vec2f(va.u, va.v),
+        mapping,
         shade,
-        light(sky_exposure, 1.75),
-        va.tile,
+        light(sky_exposure, 2.75),
+        tile,
     );
 }
 

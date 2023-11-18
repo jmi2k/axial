@@ -9,10 +9,7 @@ use glam::IVec3;
 use noise::{NoiseFn, Perlin};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-use crate::{
-    chunk::{self, Chunk},
-    types::Layer,
-};
+use crate::chunk::{self, Chunk};
 
 const NUM_THREADS: usize = 4;
 
@@ -54,99 +51,53 @@ fn spawn(seed: u64, chunk_tx: Sender<(IVec3, Chunk)>) -> Sender<IVec3> {
 
 fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
     let mut chunk = Chunk::new();
-    let mut underflow = Layer::<i16, 32>::default();
-    let mut overflow = Layer::<i16, 32>::default();
+    let mut overflow = Chunk::new();
 
-    let id_air = 0;
-    let id_grass = 1;
-    let id_dirt = 2;
-    let id_stone = 3;
-    let id_wheat_0 = 4;
+    let grass = 1;
+    let dirt = 2;
+    let stone = 3;
+    let wheat = 5;
 
-    let mut place = |location, block| {
-        let IVec3 { x, y, z } = location;
-
-        match z {
-            32 => unsafe {
-                *overflow
-                    .get_unchecked_mut(y as usize)
-                    .get_unchecked_mut(x as usize) = block;
-            }
-
-            _ => {
-                chunk.place(location, block);
-            }
-        }
-    };
-
-    // Generate terrain shape
-    #[rustfmt::skip]
-    for z in 0..33 {
-    for y in 0..32 {
-    for x in 0..32 {
-        let block_loc = IVec3 { x, y, z };
-
-        let shift = match z {
-            32 => IVec3::Z,
-            _ => IVec3::ZERO,
-        };
-
-        let IVec3 { x, y, z } = chunk::merge_loc(location + shift, block_loc);
-        let factor = SQRT_2 / 100.;
-
-        let noises = array::from_fn::<_, 2, _>(|idx| {
-            let scale = 10f64.powi(idx as _);
-            let damp = 0.45 / scale;
-            let x = x as f64 * factor * scale;
-            let y = y as f64 * factor * scale;
-            let z = z as f64 * factor * scale;
-            perlins[idx].get([x, y, z]) * damp
-        });
-
-        let sample = 0.5 + noises.into_iter().sum::<f64>();
-
-        if sample * z as f64 > 8. {
-            place(block_loc, id_air);
-            continue;
-        }
-
-        place(block_loc, id_stone);
-    }
-    }
-    }
-
-    // Create layers of dirt and grass
     #[rustfmt::skip]
     for y in 0..32 {
     for x in 0..32 {
         let mut accumulator = 0;
 
-        let block_above = unsafe {
-            *overflow
-                .get_unchecked(y as usize)
-                .get_unchecked(x as usize)
-        };
-
-        if block_above == id_stone {
-            accumulator += 1;
-        }
-
-        for z in (0..32).rev() {
+        for z in (0..32 + 5).rev() {
             let block_loc = IVec3 { x, y, z };
-            let current_block = chunk[block_loc];
+            let chunk = if z < 32 { &mut chunk } else { &mut overflow };
+            let shift = if z < 32 { IVec3::ZERO } else { IVec3::Z };
+            let IVec3 { x, y, z } = chunk::merge_loc(location + shift, block_loc);
+            let factor = SQRT_2 / 100.;
 
-            if current_block != id_stone {
+            if z < -64 {
+                continue;
+            }
+
+            let noises = array::from_fn::<_, 2, _>(|idx| {
+                let scale = 10f64.powi(idx as _);
+                let damp = 0.45 / scale;
+                let x = x as f64 * factor * scale;
+                let y = y as f64 * factor * scale;
+                let z = z as f64 * factor * scale;
+                perlins[idx].get([x, y, z]) * damp
+            });
+
+            let sample = 0.5 + noises.into_iter().sum::<f64>();
+
+            if sample * z as f64 > 8. {
                 accumulator = 0;
                 continue;
             }
 
-            let replacement = match accumulator {
-                0 => id_grass,
-                1..=3 => id_dirt,
-                _ => continue,
+            let block = match accumulator {
+                0 => wheat,
+                1 => grass,
+                2..=4 => dirt,
+                _ => stone,
             };
 
-            chunk.place(block_loc, replacement);
+            chunk.place(block_loc, block);
             accumulator += 1;
         }
     }
