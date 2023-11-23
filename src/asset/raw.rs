@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use arrayvec::ArrayVec;
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Mat3, Vec2, Vec3, IVec3};
 use serde::Deserialize;
 
 use crate::types::{DirMap, Direction, Side};
@@ -9,9 +9,29 @@ use crate::types::{DirMap, Direction, Side};
 use super::{Quad, Vertex};
 
 #[derive(Deserialize)]
+#[derive(Debug)]
+pub(super) struct Structure<'src> {
+    #[serde(default)]
+    pub center: IVec3,
+
+    #[serde(borrow)]
+    pub aliases: Vec<(char, &'src str)>,
+
+    #[serde(borrow)]
+    pub layers: Vec<&'src str>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct Mapping<'src> {
     #[serde(borrow)]
     pub tile: &'src Path,
+
+    #[serde(borrow)]
+    #[serde(default = "path_empty")]
+    pub tint_mask: &'src Path,
+
+    #[serde(default)]
+    pub randomize: bool,
 
     #[serde(default)]
     pub p: Vec2,
@@ -21,6 +41,10 @@ pub(super) struct Mapping<'src> {
 
     #[serde(default = "vec2_y")]
     pub v: Vec2,
+}
+
+fn path_empty() -> &'static Path {
+    Path::new("")
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -55,7 +79,7 @@ pub(super) enum Part<'src> {
 }
 
 impl Part<'_> {
-    pub fn desugar(self, tile_names: &[PathBuf]) -> ArrayVec<(Side, Quad), 6> {
+    pub fn desugar(self, tile_names: &[PathBuf], mask_names: &[PathBuf]) -> ArrayVec<(Side, Quad), 6> {
         match self {
             Part::Cuboid {
                 o,
@@ -74,19 +98,19 @@ impl Part<'_> {
                 let xyz = x + y + z - o - o;
 
                 let quads = [
-                    desugar_rect(_y_, ___, _yz, mappings.west, tile_names),
-                    desugar_rect(x__, xy_, x_z, mappings.east, tile_names),
-                    desugar_rect(___, x__, __z, mappings.south, tile_names),
-                    desugar_rect(xy_, _y_, xyz, mappings.north, tile_names),
-                    desugar_rect(_y_, xy_, ___, mappings.down, tile_names),
-                    desugar_rect(__z, x_z, _yz, mappings.up, tile_names),
+                    desugar_rect(_y_, ___, _yz, mappings.west, tile_names, mask_names),
+                    desugar_rect(x__, xy_, x_z, mappings.east, tile_names, mask_names),
+                    desugar_rect(___, x__, __z, mappings.south, tile_names, mask_names),
+                    desugar_rect(xy_, _y_, xyz, mappings.north, tile_names, mask_names),
+                    desugar_rect(_y_, xy_, ___, mappings.down, tile_names, mask_names),
+                    desugar_rect(__z, x_z, _yz, mappings.up, tile_names, mask_names),
                 ];
 
                 ArrayVec::from_iter(quads)
             }
 
             Part::Rect { o, x, y, mapping } => {
-                let quad = [desugar_rect(o, x, y, mapping, tile_names)];
+                let quad = [desugar_rect(o, x, y, mapping, tile_names, mask_names)];
                 ArrayVec::from_iter(quad)
             }
         }
@@ -127,8 +151,9 @@ fn desugar_rect(
     y: Vec3,
     mapping: Mapping<'_>,
     tile_names: &[PathBuf],
+    mask_names: &[PathBuf],
 ) -> (Side, Quad) {
-    let Mapping { tile, p, u, v } = mapping;
+    let Mapping { tile, tint_mask, randomize, p, u, v } = mapping;
     let normal = Vec3::cross(x - o, y - o);
     let coords = Mat3::from_cols(o, x, y).transpose();
 
@@ -152,22 +177,28 @@ fn desugar_rect(
     let _v = v;
     let uv = u + v - p;
 
-    let idx = tile_names
+    let tile_idx = tile_names
         .binary_search_by_key(&tile, PathBuf::as_path)
-        .unwrap() as u32;
+        .unwrap() as i32;
+
+    let mask_idx = mask_names
+        .binary_search_by_key(&tint_mask, PathBuf::as_path)
+        .unwrap() as i32;
+
+    let tile = if randomize { -(tile_idx + 1) } else { tile_idx + 1 };
 
     let vertices = [
-        Vertex::new(oo, _v, normal, idx),
-        Vertex::new(x_, uv, normal, idx),
-        Vertex::new(_y, pp, normal, idx),
-        Vertex::new(xy, u_, normal, idx),
+        Vertex::new(oo, _v, normal, tile, mask_idx),
+        Vertex::new(x_, uv, normal, tile, mask_idx),
+        Vertex::new(_y, pp, normal, tile, mask_idx),
+        Vertex::new(xy, u_, normal, tile, mask_idx),
     ];
 
     let quad = normalize_quad(vertices, normal);
     (cull, quad)
 }
 
-fn normalize_quad(mut vertices: Quad, normal: Vec3) -> Quad {
+fn normalize_quad(vertices: Quad, normal: Vec3) -> Quad {
     // jmi2k: enforce canonical ordering in position
     // jmi2k: enforce canonical ordering in UV (signs)
 

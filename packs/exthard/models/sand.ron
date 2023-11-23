@@ -1,0 +1,23 @@
+(
+
+hides: (
+    west: true,
+    east: true,
+    south: true,
+    north: true,
+    down: true,
+    up: true,
+),
+
+parts: [
+    Cuboid({
+        west: (tile: "sand", randomize: true),
+        east: (tile: "sand", randomize: true),
+        south: (tile: "sand", randomize: true),
+        north: (tile: "sand", randomize: true),
+        down: (tile: "sand", randomize: true),
+        up: (tile: "sand", randomize: true),
+    }),
+],
+
+)

@@ -41,6 +41,7 @@ use winit::{
 };
 use world::World;
 
+const MAX_DISTANCE: usize = 8;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
@@ -79,8 +80,6 @@ async fn main() {
         .with_inner_size(PhysicalSize::new(854, 480))
         .build(&event_loop)
         .unwrap();
-
-    const MAX_DISTANCE: usize = 12;
     let mut pov = Pov::default();
     let mut walks = DirMap::default();
 
@@ -100,6 +99,7 @@ async fn main() {
     #[allow(clippy::unusual_byte_groupings, reason = "digits form words")]
     let terraformer = Terraformer::new(0xA11_1DEA5_FA11_DEAD);
     let mut mesh = vec![];
+    let mut alpha_mesh = vec![];
     let mut generating = HashSet::new();
 
     // let mut generating = HashSet::<IVec3>::new();
@@ -113,6 +113,26 @@ async fn main() {
     //     }
     //     }
     //     world.load(IVec3::NEG_Z, chunk);
+    // }
+
+    // let max_distance = MAX_DISTANCE as i32;
+
+    // let (chunk_loc, _) = chunk::split_loc(pov.position.as_ivec3());
+    // let IVec3 { x, y, z } = chunk_loc;
+
+    // #[rustfmt::skip]
+    // for k in z - max_distance .. z + max_distance {
+    // for j in y - max_distance .. y + max_distance {
+    // for i in x - max_distance .. x + max_distance {
+    //     let chunk_loc = IVec3::new(i, j, k);
+
+    //     // jmi2k: this eats ~10ms at MAX_DISTANCE = 24, maybe optimize conditions? caching?
+    //     if world.chunk(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
+    //         terraformer.terraform(chunk_loc);
+    //         generating.insert(chunk_loc);
+    //     }
+    // }
+    // }
     // }
 
     let _ = event_loop.run(move |event, target| {
@@ -232,6 +252,11 @@ async fn main() {
             pack.model("stone"),
             pack.model("wheat_0"),
             pack.model("wheat"),
+            pack.model("water"),
+            pack.model("water_surface"),
+            pack.model("sand"),
+            pack.model("wood"),
+            pack.model("leaves"),
         ];
 
         let then = Instant::now();
@@ -293,11 +318,12 @@ async fn main() {
                 && neighbor_chunks.down.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
                 && neighbor_chunks.up.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
             {
-                renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &[]);
+                renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &[], &[]);
                 continue;
             }
 
             mesh.clear();
+            alpha_mesh.clear();
 
             for side in SIDES {
                 #[rustfmt::skip]
@@ -331,6 +357,8 @@ async fn main() {
                         continue;
                     };
 
+                    let translucent = (6..=7).contains(&block);
+
                     // jmi2k: ugly...
                     let culled = 'here: {
                         let Some(direction) = side else {
@@ -345,7 +373,7 @@ async fn main() {
                             _ => chunk[block_loc],
                         };
 
-                        (1..=3).contains(&neighbor)
+                        (1..=3).contains(&neighbor) || ((6..=7).contains(&block) && (6..=7).contains(&neighbor)) || (8..=10).contains(&neighbor)
                     };
 
                     // Skip hidden faces
@@ -356,6 +384,7 @@ async fn main() {
 
                     for idx in range.clone() {
                         let sky_exposure = 15;
+                        let mesh = if translucent { &mut alpha_mesh } else { &mut mesh };
 
                         // Simple inline 1D greedy meshing.
                         //
@@ -365,11 +394,12 @@ async fn main() {
                         //
                         // The face extension is done at the reference level.
                         // This is possible because the faces are canonicalized.
+                        //if false {
                         if last_face == Some((idx, sky_exposure)) {
                             let quad_ref = mesh.last_mut().unwrap();
                             render::extend_quad_ref(quad_ref, Δblock);
                         } else {
-                            let quad_ref = render::quad_ref(idx, block_loc, sky_exposure);
+                            let quad_ref = render::quad_ref(idx, block_loc, translucent, sky_exposure);
                             mesh.push(quad_ref);
                             last_face = Some((idx, sky_exposure));
                         }
@@ -379,7 +409,7 @@ async fn main() {
                 }
             }
 
-            renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &mesh);
+            renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &mesh, &alpha_mesh);
 
             if then.elapsed() > Duration::from_micros(1500) {
                 break 'mesh;
@@ -402,8 +432,8 @@ async fn main() {
 
 fn open_packs() -> (Pack, Pack) {
     let pack = asset::open("packs/exthard");
-    //let alt_pack = asset::open("packs/nostalgia");
-    let alt_pack = asset::open("packs/exthard");
+    let alt_pack = asset::open("packs/nostalgia");
+    // let alt_pack = asset::open("packs/exthard");
 
     (pack, alt_pack)
 }

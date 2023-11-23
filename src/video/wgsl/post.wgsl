@@ -32,19 +32,21 @@ fn vert_main(
 @fragment
 fn frag_main(v: V2F) -> @location(0) vec4f {
     let sample = textureLoad(frame, vec2i(v.position.xy), 0);
-    return /*grayscale*/(vignette(sample, v.position.xy));
+    // jmi2k: vignette doesn't work
+    //return grayscale(vignette(sample, v.position.xy));
+    return sample;
 }
 
 fn vignette(in: vec4f, point: vec2f) -> vec4f {
     // Hardcoded vignette parameters
-    let strength = 5.;
+    let strength = 50.;
     let extent = 0.1;
 
     let uv = point / vec2f(p.viewport);
     let foo = point * (1. - point.yx);
     let amount = pow(foo.x * foo.y * strength, extent);
 
-    return mix(vec4f(0.), in, clamp(amount, 0., 1.));
+    return mix(vec4f(0., 0., 0., 1.), in, clamp(amount / 100., 0., 1.));
 }
 
 fn grayscale(in: vec4f) -> vec4f {

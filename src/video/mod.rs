@@ -19,7 +19,8 @@ impl Gfx {
         let surface = unsafe { instance.create_surface(&window) }.unwrap();
 
         let options = RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
+            //power_preference: PowerPreference::HighPerformance,
+            power_preference: PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         };
@@ -52,7 +53,7 @@ impl Gfx {
             format: formats[0],
             width,
             height,
-            present_mode: PresentMode::AutoVsync,
+            present_mode: PresentMode::AutoNoVsync,
             alpha_mode: alpha_modes[0],
             view_formats: vec![],
         };

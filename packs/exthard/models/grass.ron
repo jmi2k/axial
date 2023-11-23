@@ -11,12 +11,12 @@ hides: (
 
 parts: [
     Cuboid({
-        west: (tile: "grass"),
-        east: (tile: "grass"),
-        south: (tile: "grass"),
-        north: (tile: "grass"),
+        west: (tile: "grass", tint_mask: "grass_tint"),
+        east: (tile: "grass", tint_mask: "grass_tint"),
+        south: (tile: "grass", tint_mask: "grass_tint"),
+        north: (tile: "grass", tint_mask: "grass_tint"),
         down: (tile: "dirt"),
-        up: (tile: "grass_up"),
+        up: (tile: "grass_up", randomize: true, tint_mask: "full_tint"),
     }),
 ],
 

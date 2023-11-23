@@ -53,10 +53,14 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
     let mut chunk = Chunk::new();
     let mut overflow = Chunk::new();
 
+    let air = 0;
     let grass = 1;
     let dirt = 2;
     let stone = 3;
     let wheat = 5;
+    let water = 6;
+    let water_surface = 7;
+    let sand = 8;
 
     #[rustfmt::skip]
     for y in 0..32 {
@@ -86,14 +90,26 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
             let sample = 0.5 + noises.into_iter().sum::<f64>();
 
             if sample * z as f64 > 8. {
+                let block = match z {
+                    16.. => air,
+                    15 => water_surface,
+                    _ => water,
+                };
+
+                chunk.place(block_loc, block);
                 accumulator = 0;
                 continue;
             }
 
-            let block = match accumulator {
-                0 => wheat,
-                1 => grass,
-                2..=4 => dirt,
+            let block = match (z, accumulator) {
+                (16.., 0) => /*wheat*/air,
+                (15.., 1) => grass,
+                (14.., 2..=4) => dirt,
+
+                (15, 0) => sand,
+                (..=14, 0) => water,
+                (..=14, 1..=4) => dirt,
+
                 _ => stone,
             };
 
@@ -105,3 +121,4 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
 
     chunk
 }
+

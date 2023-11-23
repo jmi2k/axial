@@ -11,12 +11,12 @@ hides: (
 
 parts: [
     Cuboid({
-        west: (tile: "dirt"),
-        east: (tile: "dirt"),
-        south: (tile: "dirt"),
-        north: (tile: "dirt"),
-        down: (tile: "dirt"),
-        up: (tile: "dirt"),
+        west: (tile: "dirt", randomize: true),
+        east: (tile: "dirt", randomize: true),
+        south: (tile: "dirt", randomize: true),
+        north: (tile: "dirt", randomize: true),
+        down: (tile: "dirt", randomize: true),
+        up: (tile: "dirt", randomize: true),
     }),
 ],
 
