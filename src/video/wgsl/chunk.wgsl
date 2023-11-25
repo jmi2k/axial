@@ -55,8 +55,8 @@ var tiles: texture_2d_array<f32>;
 @group(0) @binding(2)
 var masks: texture_2d_array<f32>;
 
-//@group(0) @binding(3)
-//var sanpler: sampler;
+@group(0) @binding(3)
+var sanpler: sampler;
 
 var<push_constant> p: Push;
 
@@ -169,10 +169,11 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
         }
     }
 
-    //let randomized_mapping = v.mapping;
+    //let randomized_mappinggg = v.mapping;
     //var sample = textureSample(tiles, sanpler, randomized_mapping, tile);
     // jmi2k: we gain texture randomization, but we lost mipmapping.
-    var color_sample = textureLoad(tiles, vec2i(16.0 * randomized_mapping) % 16, tile, 0);
+    //var color_sample = textureLoad(tiles, vec2i(16.0 * randomized_mapping) % 16, tile, 0);
+    var color_sample = textureSampleGrad(tiles, sanpler, randomized_mapping, tile, dpdx(v.mapping), dpdy(v.mapping));
     var mask_sample = textureLoad(masks, vec2i(16.0 * randomized_mapping) % 16, v.tint_mask, 0);
 
     if !bool(v.translucent) {

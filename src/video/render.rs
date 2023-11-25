@@ -16,7 +16,7 @@ use wgpu::{
     RenderPipelineDescriptor, Sampler, SamplerDescriptor, ShaderStages, StencilState, StoreOp,
     SurfaceConfiguration, SurfaceTexture, Texture, TextureAspect, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode,
+    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode,
 };
 
 use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction}};
@@ -354,7 +354,7 @@ impl Renderer {
 
         let sampler_descriptor = SamplerDescriptor {
             //min_filter: FilterMode::Linear,
-            //mipmap_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
             address_mode_u: AddressMode::Repeat,
             address_mode_v: AddressMode::Repeat,
             ..SamplerDescriptor::default()
