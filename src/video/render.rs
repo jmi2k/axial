@@ -1,6 +1,6 @@
 use std::{array, collections::HashMap, f32::consts::PI, iter, mem, time::Instant, num::NonZeroU64};
 
-use glam::{IVec3, Mat4};
+use glam::{IVec3, Mat4, Vec4, Vec3};
 use image::RgbaImage;
 use wgpu::{
     include_wgsl,
@@ -19,7 +19,7 @@ use wgpu::{
     TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode,
 };
 
-use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::SideMap};
+use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction}};
 
 use super::Gfx;
 
@@ -114,8 +114,9 @@ pub struct Renderer {
     poly_chunk_pipeline: RenderPipeline,
     alpha_chunk_pipeline: RenderPipeline,
     wire_chunk_pipeline: RenderPipeline,
+    reach_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
-    loaded_meshes: HashMap<IVec3, GpuMesh>,
+    loaded_meshes: HashMap<IVec3, GpuMesh, ahash::RandomState>,
 }
 
 impl Renderer {
@@ -242,6 +243,64 @@ impl Renderer {
             (poly_pipeline, alpha_pipeline, wire_pipeline)
         };
 
+        let reach_pipeline = {
+            let shader = ctx
+                .device
+                .create_shader_module(include_wgsl!("wgsl/reach.wgsl"));
+
+            #[rustfmt::skip]
+            let push_constant_ranges = &[
+                PushConstantRange { stages: ShaderStages::VERTEX, range: 0..64 + 12 + 4 },
+            ];
+
+            let layout_desc = PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[],
+                push_constant_ranges,
+            };
+
+            let layout = ctx.device.create_pipeline_layout(&layout_desc);
+
+            let primitive = PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                front_face: FrontFace::Ccw,
+                polygon_mode: PolygonMode::Fill,
+                ..PrimitiveState::default()
+            };
+
+            let vertex = VertexState {
+                module: &shader,
+                entry_point: "vert_main",
+                buffers: &[],
+            };
+
+            let target = ColorTargetState {
+                format: ctx.config.format,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            };
+
+            let fragment = FragmentState {
+                module: &shader,
+                entry_point: "frag_main",
+                targets: &[Some(target)],
+            };
+
+            let pipeline_desc = RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                primitive,
+                vertex: vertex.clone(),
+                fragment: Some(fragment.clone()),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                multiview: None,
+            };
+
+            ctx.device.create_render_pipeline(&pipeline_desc)
+        };
+
         let post_pipeline = {
             let shader = ctx
                 .device
@@ -318,6 +377,7 @@ impl Renderer {
             poly_chunk_pipeline,
             alpha_chunk_pipeline,
             wire_chunk_pipeline,
+            reach_pipeline,
             post_pipeline,
             loaded_meshes: HashMap::default(),
         }
@@ -326,6 +386,7 @@ impl Renderer {
     pub fn update_pack(&mut self, ctx: &Gfx, pack: &Pack) {
         self.pack_group = build_pack_group(ctx, &self.pack_layout, pack, &self.sampler);
         self.loaded_meshes.clear();
+        println!("load_meshes.len() = {}", self.loaded_meshes.len());
     }
 
     // jmi2k: accept a closure instead?
@@ -379,7 +440,7 @@ impl Renderer {
             .unwrap_or_default()
     }
 
-    fn render_chunks(&mut self, encoder: &mut CommandEncoder, world: &World, pov: &Pov, max_distance: usize, wireframe: bool) {
+    fn render_chunks(&mut self, encoder: &mut CommandEncoder, /*world: &World,*/ pov: &Pov, max_distance: usize, wireframe: bool) {
         let frame_view = self.frame.create_view(&TextureViewDescriptor::default());
         let depth_view = self.depth.create_view(&TextureViewDescriptor::default());
 
@@ -419,27 +480,49 @@ impl Renderer {
         let unxform = projection.inverse();
         let time = /* jmi2k: (world.time % TICKS_PER_DAY) as u32 */ 0u32;
 
+        // jmi2k: does not work
+        let planes = [
+            xform.row(3) + xform.row(0),
+            xform.row(3) - xform.row(0),
+            xform.row(3) + xform.row(1),
+            xform.row(3) - xform.row(1),
+            xform.row(2),
+            //-xform.row(2),
+        ];
+
+        let radius = f32::sqrt(3. * 32. * 32.);
+
         let solid_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.poly_chunk_pipeline };
         let alpha_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.alpha_chunk_pipeline };
 
         let mut pass = encoder.begin_render_pass(&descriptor);
-        pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_pipeline(solid_pipeline);
+        pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&unxform));
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 140, &time.to_ne_bytes());
 
-        pass.set_pipeline(solid_pipeline);
+        let mut num_rendered = 0;
 
+        'render:
         for (location, mesh) in &self.loaded_meshes {
             let GpuMesh { vertex_buf, .. } = mesh;
             let num_vertices = vertex_buf.size() / VERTEX_LAYOUT.array_stride;
+            let location = chunk::merge_loc(*location, IVec3::ZERO);
 
             if num_vertices == 0 {
                 continue;
             }
 
-            let location = chunk::merge_loc(*location, IVec3::ZERO);
+            let center = (location + 16).as_vec3();
+
+            for plane in planes {
+                let spherical_distance = center.dot(plane.truncate()) + plane.w;
+                if spherical_distance < -radius { continue 'render; }
+            }
+
+            num_rendered += 1;
+
             pass.set_push_constants(ShaderStages::VERTEX, 128, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, vertex_buf.slice(..));
             pass.draw(0..num_vertices as _, 0..1);
@@ -447,6 +530,7 @@ impl Renderer {
 
         pass.set_pipeline(alpha_pipeline);
 
+        'render:
         for (location, mesh) in &self.loaded_meshes {
             let GpuMesh { alpha_vertex_buf, .. } = mesh;
             let num_vertices = alpha_vertex_buf.size() / VERTEX_LAYOUT.array_stride;
@@ -456,10 +540,47 @@ impl Renderer {
                 continue;
             }
 
+            let center = (location + 16).as_vec3();
+
+            for plane in planes {
+                let spherical_distance = center.dot(plane.truncate()) + plane.w;
+                if spherical_distance < -radius { continue 'render; }
+            }
+
             pass.set_push_constants(ShaderStages::VERTEX, 128, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
             pass.draw(0..num_vertices as _, 0..1);
         }
+    }
+
+    fn render_reach(&mut self, encoder: &mut CommandEncoder, pov: &Pov, location: IVec3, direction: Direction) {
+        let frame_view = self.frame.create_view(&TextureViewDescriptor::default());
+
+        let color_att = RenderPassColorAttachment {
+            view: &frame_view,
+            resolve_target: None,
+
+            #[rustfmt::skip]
+            ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
+        };
+
+        let descriptor = RenderPassDescriptor {
+            color_attachments: &[Some(color_att)],
+            depth_stencil_attachment: None,
+            ..RenderPassDescriptor::default()
+        };
+
+        let Extent3d { width, height, .. } = self.frame.size();
+        let aspect = width as f32 / height as f32;
+        let projection = Mat4::perspective_rh(FOV, aspect, ZNEAR, ZFAR);
+        let xform = projection * Mat4::from(pov);
+
+        let mut pass = encoder.begin_render_pass(&descriptor);
+        pass.set_pipeline(&self.reach_pipeline);
+        pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
+        pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
+        pass.set_push_constants(ShaderStages::VERTEX, 76, &(direction as u32).to_ne_bytes());
+        pass.draw(0..6, 0..1);
     }
 
     fn render_post(&self, encoder: &mut CommandEncoder, output: &SurfaceTexture) {
@@ -492,7 +613,7 @@ impl Renderer {
         pass.draw(0..3, 0..1);
     }
 
-    pub fn render(&mut self, ctx: &Gfx, world: &World, pov: &Pov, max_distance: usize, wireframe: bool) {
+    pub fn render(&mut self, ctx: &Gfx, /*world: &World,*/ pov: &Pov, reached_face: Option<(IVec3, Direction)>, max_distance: usize, wireframe: bool) {
         let SurfaceConfiguration { width, height, .. } = ctx.config;
         let output = ctx.surface.get_current_texture().unwrap();
 
@@ -509,7 +630,10 @@ impl Renderer {
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
-        self.render_chunks(&mut encoder, world, pov, max_distance, wireframe);
+        self.render_chunks(&mut encoder, /*world,*/ pov, max_distance, wireframe);
+        if let Some((location, direction)) = reached_face {
+            self.render_reach(&mut encoder, pov, location, direction);
+        }
         self.render_post(&mut encoder, &output);
 
         ctx.queue.submit(iter::once(encoder.finish()));

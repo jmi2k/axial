@@ -53,7 +53,7 @@ impl Gfx {
             format: formats[0],
             width,
             height,
-            present_mode: PresentMode::AutoNoVsync,
+            present_mode: PresentMode::AutoVsync,
             alpha_mode: alpha_modes[0],
             view_formats: vec![],
         };

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use winit::{
     dpi::PhysicalSize,
-    event::{DeviceEvent, ElementState, Event, KeyEvent, WindowEvent},
+    event::{DeviceEvent, ElementState, Event, KeyEvent, MouseButton, WindowEvent, MouseScrollDelta},
     keyboard::{KeyCode, PhysicalKey},
 };
 
@@ -15,7 +15,10 @@ pub enum Input {
     Unfocus,
     Motion,
     Press(KeyCode),
-    Release(KeyCode),
+    Unpress(KeyCode),
+    Click(MouseButton),
+    Unclick(MouseButton),
+    Scroll,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -28,6 +31,7 @@ pub enum Action {
     Turn,
     Walk(Direction),
     Stop(Direction),
+    Sprint,
 
     Redraw,
     Resize(PhysicalSize<u32>),
@@ -39,7 +43,8 @@ pub enum Action {
 pub struct Handler {
     pub bindings: HashMap<Input, Action>,
     pub pressed_keys: HashSet<KeyCode>,
-    pub delta: (f64, f64),
+    pub cursor_delta: (f64, f64),
+    pub scroll_delta: (f32, f32),
 }
 
 impl Handler {
@@ -57,13 +62,16 @@ impl Handler {
             Event::WindowEvent {
                 event: WindowEvent::Focused(focus),
                 ..
-            } => self.lookup_binding(if focus { Input::Focus } else { Input::Unfocus }),
+            } => {
+                let input = if focus { Input::Focus } else { Input::Unfocus };
+                self.lookup_binding(input)
+            }
 
             Event::DeviceEvent {
                 event: DeviceEvent::MouseMotion { delta },
                 ..
             } => {
-                self.delta = delta;
+                self.cursor_delta = delta;
                 self.lookup_binding(Input::Motion)
             }
 
@@ -71,6 +79,28 @@ impl Handler {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
             } => self.handle_key(event),
+
+            Event::WindowEvent {
+                event: WindowEvent::MouseInput { button, state, .. },
+                ..
+            } => {
+                let pressed = state.is_pressed();
+                #[rustfmt::skip]
+                let input = if pressed { Input::Click(button) } else { Input::Unclick(button) };
+                self.lookup_binding(input)
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::MouseWheel { delta, phase, .. },
+                ..
+            } => {
+                let MouseScrollDelta::LineDelta(dx, dy) = delta else {
+                    return Action::Nop;
+                };
+
+                self.scroll_delta = (dx, dy);
+                self.lookup_binding(Input::Scroll)
+            }
 
             Event::WindowEvent {
                 event: WindowEvent::Resized(size),
@@ -102,7 +132,7 @@ impl Handler {
 
             ElementState::Released if pressed => {
                 self.pressed_keys.remove(&code);
-                self.lookup_binding(Input::Release(code))
+                self.lookup_binding(Input::Unpress(code))
             }
 
             _ => Action::default(),
@@ -118,7 +148,8 @@ where
         Self {
             bindings: value.into(),
             pressed_keys: HashSet::new(),
-            delta: Default::default(),
+            cursor_delta: Default::default(),
+            scroll_delta: Default::default(),
         }
     }
 }

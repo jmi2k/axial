@@ -4,7 +4,9 @@
 #![feature(isqrt)]
 #![feature(iter_collect_into)]
 #![feature(lint_reasons)]
+#![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(new_uninit)]
+#![feature(ptr_as_uninit)]
 #![feature(slice_flatten)]
 #![feature(stmt_expr_attributes)]
 #![feature(variant_count)]
@@ -20,12 +22,13 @@ mod world;
 
 use std::{
     mem,
-    time::{Duration, Instant}, collections::HashSet,
+    time::{Duration, Instant}, collections::HashSet, process,
 };
 
+use arrayvec::ArrayVec;
 use asset::Pack;
 use event::{Action, Handler, Input};
-use glam::{IVec3, Quat, Vec3};
+use glam::{IVec3, Quat, Vec3, EulerRot};
 use pov::Pov;
 use terraform::Terraformer;
 use types::{Direction, SIDES, DirMap, SideMap};
@@ -37,15 +40,15 @@ use winit::{
     dpi::PhysicalSize,
     event_loop::{ControlFlow, EventLoop},
     keyboard::KeyCode,
-    window::{CursorGrabMode, Fullscreen, WindowBuilder},
+    window::{CursorGrabMode, Fullscreen, WindowBuilder}, event::MouseButton,
 };
 use world::World;
 
-const MAX_DISTANCE: usize = 8;
+const MAX_DISTANCE: usize = 12;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
-const BINDINGS: [(Input, Action); 20] = [
+const BINDINGS: [(Input, Action); 24] = [
     (Input::Motion,                      Action::Turn),
     (Input::Close,                       Action::Exit),
     (Input::Press(KeyCode::Escape),      Action::Exit),
@@ -54,18 +57,22 @@ const BINDINGS: [(Input, Action); 20] = [
     (Input::Press(KeyCode::KeyE),        Action::Debug("reload packs")),
     (Input::Press(KeyCode::Backquote),   Action::Debug("switch packs")),
     (Input::Press(KeyCode::Tab),         Action::Fullscreen),
+    (Input::Press(KeyCode::ControlLeft), Action::Sprint),
     (Input::Press(KeyCode::KeyW),        Action::Walk(Direction::North)),
     (Input::Press(KeyCode::KeyA),        Action::Walk(Direction::West)),
     (Input::Press(KeyCode::KeyS),        Action::Walk(Direction::South)),
     (Input::Press(KeyCode::KeyD),        Action::Walk(Direction::East)),
     (Input::Press(KeyCode::Space),       Action::Walk(Direction::Up)),
     (Input::Press(KeyCode::ShiftLeft),   Action::Walk(Direction::Down)),
-    (Input::Release(KeyCode::KeyW),      Action::Stop(Direction::North)),
-    (Input::Release(KeyCode::KeyA),      Action::Stop(Direction::West)),
-    (Input::Release(KeyCode::KeyS),      Action::Stop(Direction::South)),
-    (Input::Release(KeyCode::KeyD),      Action::Stop(Direction::East)),
-    (Input::Release(KeyCode::Space),     Action::Stop(Direction::Up)),
-    (Input::Release(KeyCode::ShiftLeft), Action::Stop(Direction::Down)),
+    (Input::Unpress(KeyCode::KeyW),      Action::Stop(Direction::North)),
+    (Input::Unpress(KeyCode::KeyA),      Action::Stop(Direction::West)),
+    (Input::Unpress(KeyCode::KeyS),      Action::Stop(Direction::South)),
+    (Input::Unpress(KeyCode::KeyD),      Action::Stop(Direction::East)),
+    (Input::Unpress(KeyCode::Space),     Action::Stop(Direction::Up)),
+    (Input::Unpress(KeyCode::ShiftLeft), Action::Stop(Direction::Down)),
+    (Input::Click(MouseButton::Left),    Action::Debug("destroy block")),
+    (Input::Click(MouseButton::Right),   Action::Debug("place block")),
+    (Input::Scroll,                      Action::Debug("change block")),
 ];
 
 #[pollster::main]
@@ -80,8 +87,10 @@ async fn main() {
         .with_inner_size(PhysicalSize::new(854, 480))
         .build(&event_loop)
         .unwrap();
+
     let mut pov = Pov::default();
     let mut walks = DirMap::default();
+    let mut sprint = false;
 
     let mut gfx = Gfx::new(&window).await;
     window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
@@ -101,6 +110,8 @@ async fn main() {
     let mut mesh = vec![];
     let mut alpha_mesh = vec![];
     let mut generating = HashSet::new();
+    let mut pladec_queue = ArrayVec::<bool, 16>::new();
+    let mut selected_block = 1;
 
     // let mut generating = HashSet::<IVec3>::new();
     // {
@@ -115,29 +126,12 @@ async fn main() {
     //     world.load(IVec3::NEG_Z, chunk);
     // }
 
-    // let max_distance = MAX_DISTANCE as i32;
-
-    // let (chunk_loc, _) = chunk::split_loc(pov.position.as_ivec3());
-    // let IVec3 { x, y, z } = chunk_loc;
-
-    // #[rustfmt::skip]
-    // for k in z - max_distance .. z + max_distance {
-    // for j in y - max_distance .. y + max_distance {
-    // for i in x - max_distance .. x + max_distance {
-    //     let chunk_loc = IVec3::new(i, j, k);
-
-    //     // jmi2k: this eats ~10ms at MAX_DISTANCE = 24, maybe optimize conditions? caching?
-    //     if world.chunk(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
-    //         terraformer.terraform(chunk_loc);
-    //         generating.insert(chunk_loc);
-    //     }
-    // }
-    // }
-    // }
+    let mut reached_face = None;
 
     let _ = event_loop.run(move |event, target| {
         match event_handler.handle(event) {
             Action::Exit => {
+                process::exit(0);
                 target.exit();
             }
 
@@ -151,7 +145,7 @@ async fn main() {
             }
 
             Action::Turn => {
-                let (x, y) = event_handler.delta;
+                let (x, y) = event_handler.cursor_delta;
                 pov.yaw += x as f32 * 1e-3;
                 pov.pitch += y as f32 * 1e-3;
             }
@@ -162,6 +156,11 @@ async fn main() {
 
             Action::Stop(direction) => {
                 walks[direction] = false;
+                sprint &= IVec3::from(&walks) != IVec3::ZERO;
+            }
+
+            Action::Sprint => {
+                sprint |= IVec3::from(&walks) != IVec3::ZERO;
             }
 
             Action::Redraw => {
@@ -186,6 +185,19 @@ async fn main() {
                 renderer.update_pack(&gfx, &pack);
             }
 
+            Action::Debug("place block") => {
+                pladec_queue.push(true);
+            }
+
+            Action::Debug("destroy block") => {
+                pladec_queue.push(false);
+            }
+
+            Action::Debug("change block") => {
+                selected_block += event_handler.scroll_delta.1 as i16;
+                selected_block = selected_block.rem_euclid(10);
+            }
+
             _ => {}
         }
 
@@ -198,26 +210,40 @@ async fn main() {
         let (chunk_loc, _) = chunk::split_loc(pov.position.as_ivec3());
         let IVec3 { x, y, z } = chunk_loc;
 
+        {
+        optick::event!("receive");
+
         while let Ok((location, chunk)) = terraformer.chunk_rx().try_recv() {
             world.load(location, chunk);
             generating.remove(&location);
         }
 
+        }
+
         let max_distance = MAX_DISTANCE as i32;
 
+        let aim2 = Quat::from_euler(EulerRot::ZXY, -pov.yaw, -pov.pitch, 0.) * Vec3::Y;
+
         {
-        optick::event!("tick drain");
+        optick::event!("tick");
 
         // jmi2k: this takes too long
         while accrued_time >= TICK_DURATION {
+            {
+            optick::event!("generate");
+
             #[rustfmt::skip]
             for k in z - max_distance .. z + max_distance {
             for j in y - max_distance .. y + max_distance {
             for i in x - max_distance .. x + max_distance {
                 let chunk_loc = IVec3::new(i, j, k);
 
+                let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
+                let distance = pov.position.distance(fine_loc.as_vec3());
+                let max_distance = MAX_DISTANCE as f32 * 32.;
+
                 // jmi2k: this eats ~10ms at MAX_DISTANCE = 24, maybe optimize conditions? caching?
-                if world.chunk(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
+                if distance <= max_distance && world.chunk_mut(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
                     terraformer.terraform(chunk_loc);
                     generating.insert(chunk_loc);
                 }
@@ -225,19 +251,83 @@ async fn main() {
             }
             }
 
-            // jmi2k: moar crap
-            pov.position += aim * 1.;
-            // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
-            let time = world.tick();
+            }
 
-            if time % 64 == 0 {
-                eprintln!("position: {:?}", pov.position.as_ivec3());
+            // jmi2k: moar crap
+            pov.position += aim * if sprint { 4e-1 } else { 2e-1 };
+            // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
+            let time = {
+                optick::event!("world tick");
+                world.tick()
+            };
+
+            if let Some((location, direction)) = reached_face {
+                //let mut world = world::<1>::new(&mut world);
+                for action in &pladec_queue {
+                    if *action {
+                        world.place(location + IVec3::from(direction), selected_block);
+                    } else {
+                        world.destroy(location);
+                    }
+                }
+            }
+
+            pladec_queue.clear();
+
+            if time % 32 == 0 {
+                eprintln!("position: {:?}   reach: {:?}", pov.position.as_ivec3(), reached_face);
             }
 
             accrued_time -= TICK_DURATION;
         }
 
         }
+
+        let (mut x, mut y, mut z) = pov.position.as_ivec3().into();
+        let (sx, sy, sz) = aim2.signum().as_ivec3().into();
+        let (dx, dy, dz) = (IVec3::new(sx, sy, sz).as_vec3() / aim2).into();
+        let i = (IVec3::new(x, y, z) + IVec3::new(sx, sy, sz)).as_vec3() - pov.position;
+        let (mut tx, mut ty, mut tz) = (i / aim2).into();
+        let mut block = 0;
+        let mut direction = Direction::Up;
+
+        loop {
+            if tx < ty {
+                if tx < tz {
+                    x += sx;
+                    tx += dx;
+                    direction = if aim2.x < 0. { Direction::East } else { Direction::West };
+                } else {
+                    z += sz;
+                    tz += dz;
+                    direction = if aim2.z < 0. { Direction::Up } else { Direction::Down };
+                }
+            } else {
+                if ty < tz {
+                    y += sy;
+                    ty += dy;
+                    direction = if aim2.y < 0. { Direction::North } else { Direction::South };
+                } else {
+                    z += sz;
+                    tz += dz;
+                    direction = if aim2.z < 0. { Direction::Up } else { Direction::Down };
+                }
+            }
+
+            if (Vec3::new(tx, ty, tz) * aim2).length() > 10. {
+                break;
+            }
+
+            let (chunk_loc, block_loc) = chunk::split_loc(IVec3 { x, y, z });
+            let Some(chunk) = world.chunk(chunk_loc) else { break; };
+            block = chunk[block_loc];
+
+            if ![0, 6, 7].contains(&block) {
+                break;
+            }
+        }
+
+        reached_face = if ![0, 6, 7].contains(&block) { Some((IVec3 { x, y, z }, direction)) } else { None };
 
         if !redraw {
             return;
@@ -254,12 +344,17 @@ async fn main() {
             pack.model("wheat"),
             pack.model("water"),
             pack.model("water_surface"),
+            pack.model("glass"),
             pack.model("sand"),
             pack.model("wood"),
             pack.model("leaves"),
         ];
 
         let then = Instant::now();
+        let IVec3 { x, y, z } = chunk_loc;
+
+        {
+        optick::event!("mesh");
 
         #[rustfmt::skip]
         'mesh:
@@ -278,9 +373,13 @@ async fn main() {
 
             // Unload far away chunks
             if distance > max_distance {
-                world.unload(chunk_loc);
                 continue;
             }
+
+            // Early continue if there is no chunk
+            let Some(chunk) = world.chunk(chunk_loc) else {
+                continue;
+            };
 
             // Discard empty chunks immediately
             if chunk.num_blocks() == 0 {
@@ -311,12 +410,12 @@ async fn main() {
 
             // Discard enclosed chunks immediately
             // jmi2k: can be improved, and also must take into account whether the player is inside
-            if neighbor_chunks.west.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
-                && neighbor_chunks.east.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
-                && neighbor_chunks.south.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
-                && neighbor_chunks.north.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
-                && neighbor_chunks.down.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
-                && neighbor_chunks.up.map(|chunk| chunk.num_blocks() == 32768).unwrap_or(false)
+            if neighbor_chunks.west.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
+                && neighbor_chunks.east.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
+                && neighbor_chunks.south.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
+                && neighbor_chunks.north.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
+                && neighbor_chunks.down.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
+                && neighbor_chunks.up.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
             {
                 renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &[], &[]);
                 continue;
@@ -373,7 +472,7 @@ async fn main() {
                             _ => chunk[block_loc],
                         };
 
-                        (1..=3).contains(&neighbor) || ((6..=7).contains(&block) && (6..=7).contains(&neighbor)) || (8..=10).contains(&neighbor)
+                        (1..=3).contains(&neighbor) || ((6..=7).contains(&block) && (6..=7).contains(&neighbor)) || (9..=11).contains(&neighbor)
                     };
 
                     // Skip hidden faces
@@ -418,13 +517,16 @@ async fn main() {
         }
         }
 
-        let target = pov.position + aim * 1.;
+        }
+
+        let target = pov.position + aim * if sprint { 4e-1 } else { 2e-1 };
         let pov_interpolated = Pov {
             position: Vec3::lerp(pov.position, target, accrued_time.as_secs_f32() / TICK_DURATION.as_secs_f32()),
             ..pov
         };
 
-        renderer.render(&gfx, &world, &pov_interpolated, MAX_DISTANCE, wireframe);
+        optick::event!("gpu");
+        renderer.render(&gfx, /*&world,*/ &pov_interpolated, reached_face, MAX_DISTANCE, wireframe);
         optick::next_frame();
         redraw = false;
     });

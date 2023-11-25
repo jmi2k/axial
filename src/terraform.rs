@@ -60,7 +60,8 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
     let wheat = 5;
     let water = 6;
     let water_surface = 7;
-    let sand = 8;
+    let glass = 8;
+    let sand = 9;
 
     #[rustfmt::skip]
     for y in 0..32 {

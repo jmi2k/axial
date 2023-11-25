@@ -1,27 +1,31 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering}, array, ptr::{self, addr_of_mut}, mem::MaybeUninit,
 };
 
 use glam::IVec3;
 
-use crate::chunk::{self, Chunk};
+use crate::{chunk::{self, Chunk}, types::Cube};
 
 pub struct World {
     next_tick: AtomicU64,
-    loaded_chunks: HashMap<IVec3, Chunk>,
+    loaded_chunks: HashMap<IVec3, Chunk, ahash::RandomState>,
 }
 
 impl World {
     pub fn new() -> Self {
         Self {
             next_tick: AtomicU64::default(),
-            loaded_chunks: HashMap::with_capacity(16 * 16 * 16),
+            loaded_chunks: HashMap::default(),
         }
     }
 
     pub fn chunk(&self, location: IVec3) -> Option<&Chunk> {
         self.loaded_chunks.get(&location)
+    }
+
+    pub fn chunk_mut(&mut self, location: IVec3) -> Option<&mut Chunk> {
+        self.loaded_chunks.get_mut(&location)
     }
 
     pub fn chunk_entry(&mut self, location: IVec3) -> Entry<IVec3, Chunk> {
@@ -46,5 +50,21 @@ impl World {
         }
 
         tick
+    }
+
+    pub fn place(&mut self, location: IVec3, block: i16) {
+        let (chunk_loc, block_loc) = chunk::split_loc(location);
+
+        if let Some(chunk) = self.chunk_mut(chunk_loc) {
+            chunk.place(block_loc, block);
+        }
+    }
+
+    pub fn destroy(&mut self, location: IVec3) {
+        let (chunk_loc, block_loc) = chunk::split_loc(location);
+
+        if let Some(chunk) = self.chunk_mut(chunk_loc) {
+            chunk.destroy(block_loc);
+        }
     }
 }

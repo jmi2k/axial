@@ -22,6 +22,7 @@ pub type Cube<T, const N: usize> = [Layer<T, N>; N];
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
+#[derive(Debug)]
 pub enum Direction {
     West,
     East,
