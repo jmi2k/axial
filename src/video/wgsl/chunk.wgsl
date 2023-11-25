@@ -1,8 +1,7 @@
 struct Push {
     xform: mat4x4f,
-    unxform: mat4x4f,
     location: vec3i,
-    time: u32,
+    time: f32,
 };
 
 struct V2F {
@@ -185,13 +184,9 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
         color_sample *= vec4f(0.529, 0.741, 0.341, 1.);
     }
 
-    let unprojected = p.unxform * v.position;
-    let distance = length(unprojected);
-
     let shaded = color_sample - vec4f(color_sample.xyz * v.shade, 0.);
     let lit = shaded * vec4(vec3(v.sky_light), 1.);
-    //let fogged = lit * (distance / 512.); // jmi2k: todo
-    let fogged = lit;
+    let fogged = lit; // jmi2k: todo
     return fogged;
 }
 

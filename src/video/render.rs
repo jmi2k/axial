@@ -141,8 +141,8 @@ impl Renderer {
 
             #[rustfmt::skip]
             let push_constant_ranges = &[
-                PushConstantRange { stages: ShaderStages::VERTEX, range: 0..144 },
-                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 140..144 },
+                PushConstantRange { stages: ShaderStages::VERTEX, range: 0..80 },
+                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 76..80 },
             ];
 
             let layout_desc = PipelineLayoutDescriptor {
@@ -250,7 +250,8 @@ impl Renderer {
 
             #[rustfmt::skip]
             let push_constant_ranges = &[
-                PushConstantRange { stages: ShaderStages::VERTEX, range: 0..64 + 12 + 4 },
+                PushConstantRange { stages: ShaderStages::VERTEX, range: 0..84 },
+                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 80..84 },
             ];
 
             let layout_desc = PipelineLayoutDescriptor {
@@ -477,17 +478,14 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let projection = Mat4::perspective_rh(FOV, aspect, ZNEAR, ZFAR);
         let xform = projection * Mat4::from(pov);
-        let unxform = projection.inverse();
-        let time = /* jmi2k: (world.time % TICKS_PER_DAY) as u32 */ 0u32;
+        let time = self.epoch.elapsed().as_secs_f32();
 
-        // jmi2k: does not work
         let planes = [
             xform.row(3) + xform.row(0),
             xform.row(3) - xform.row(0),
             xform.row(3) + xform.row(1),
             xform.row(3) - xform.row(1),
             xform.row(2),
-            //-xform.row(2),
         ];
 
         let radius = f32::sqrt(3. * 32. * 32.);
@@ -499,10 +497,7 @@ impl Renderer {
         pass.set_pipeline(solid_pipeline);
         pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
-        pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&unxform));
-        pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 140, &time.to_ne_bytes());
-
-        let mut num_rendered = 0;
+        pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 76, &time.to_ne_bytes());
 
         'render:
         for (location, mesh) in &self.loaded_meshes {
@@ -521,9 +516,7 @@ impl Renderer {
                 if spherical_distance < -radius { continue 'render; }
             }
 
-            num_rendered += 1;
-
-            pass.set_push_constants(ShaderStages::VERTEX, 128, bytemuck::bytes_of(&location));
+            pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, vertex_buf.slice(..));
             pass.draw(0..num_vertices as _, 0..1);
         }
@@ -547,7 +540,7 @@ impl Renderer {
                 if spherical_distance < -radius { continue 'render; }
             }
 
-            pass.set_push_constants(ShaderStages::VERTEX, 128, bytemuck::bytes_of(&location));
+            pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
             pass.draw(0..num_vertices as _, 0..1);
         }
@@ -574,12 +567,14 @@ impl Renderer {
         let aspect = width as f32 / height as f32;
         let projection = Mat4::perspective_rh(FOV, aspect, ZNEAR, ZFAR);
         let xform = projection * Mat4::from(pov);
+        let time = self.epoch.elapsed().as_secs_f32();
 
         let mut pass = encoder.begin_render_pass(&descriptor);
         pass.set_pipeline(&self.reach_pipeline);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
         pass.set_push_constants(ShaderStages::VERTEX, 76, &(direction as u32).to_ne_bytes());
+        pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 80, &time.to_ne_bytes());
         pass.draw(0..6, 0..1);
     }
 

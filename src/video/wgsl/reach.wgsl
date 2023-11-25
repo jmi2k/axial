@@ -2,6 +2,7 @@ struct Push {
     xform: mat4x4f,
     location: vec3i,
     direction: u32,
+    time: f32,
 };
 
 var<push_constant> p: Push;

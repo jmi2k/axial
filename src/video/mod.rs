@@ -28,7 +28,7 @@ impl Gfx {
         let adapter = instance.request_adapter(&options).await.unwrap();
 
         let limits = Limits {
-            max_push_constant_size: 256,
+            max_push_constant_size: 128,
             ..Limits::default()
         };
 

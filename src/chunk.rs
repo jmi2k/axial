@@ -12,7 +12,7 @@ static NONCE: AtomicU64 = AtomicU64::new(1);
 pub struct Chunk {
     nonces: SideMap<NonZeroU64>,
     num_blocks: u16,
-    indices: Box<Cube<i16, 32>>,
+    indices: Option<Box<Cube<i16, 32>>>,
 }
 
 impl Chunk {
@@ -20,8 +20,10 @@ impl Chunk {
         let IVec3 { x, y, z } = mask_block_loc(index);
 
         unsafe {
+            let indices = self.indices.get_or_insert_with(|| Box::new_zeroed().assume_init());
+
             // Location is already masked into range
-            self.indices
+            indices
                 .get_unchecked_mut(z as usize)
                 .get_unchecked_mut(y as usize)
                 .get_unchecked_mut(x as usize)
@@ -58,16 +60,20 @@ impl Chunk {
         self.num_blocks
     }
 
-    pub fn new() -> Self {
+    fn alloc_indices(&mut self) {
         let indices = unsafe {
             // 0 is always a valid block ID, hardcoded as "air"
             Box::new_zeroed().assume_init()
         };
 
+        self.indices = Some(indices);
+    }
+
+    pub fn new() -> Self {
         Self {
             nonces: SideMap::from_fn(|_| fresh_nonce()),
             num_blocks: 0,
-            indices,
+            indices: None,
         }
     }
 
@@ -104,10 +110,11 @@ impl Index<IVec3> for Chunk {
 
     fn index(&self, index: IVec3) -> &Self::Output {
         let IVec3 { x, y, z } = mask_block_loc(index);
+        let Some(indices) = self.indices.as_ref() else { return &0; };
 
         unsafe {
             // Location is already masked into range
-            self.indices
+            indices
                 .get_unchecked(z as usize)
                 .get_unchecked(y as usize)
                 .get_unchecked(x as usize)
