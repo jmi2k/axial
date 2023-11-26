@@ -17,7 +17,7 @@ mod world;
 
 use std::{
     mem,
-    time::{Duration, Instant}, collections::HashSet, process,
+    time::{Duration, Instant}, collections::HashSet, process, sync::Arc,
 };
 
 use arrayvec::ArrayVec;
@@ -78,17 +78,17 @@ async fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let window = WindowBuilder::new()
+    let window = Arc::new(WindowBuilder::new()
         .with_title("aXial")
         .with_inner_size(PhysicalSize::new(854, 480))
         .build(&event_loop)
-        .unwrap();
+        .unwrap());
 
     let mut pov = Pov::default();
     let mut walks = DirMap::default();
     let mut sprint = false;
 
-    let mut gfx = Gfx::new(&window).await;
+    let mut gfx = Gfx::new(window.clone()).await;
     window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
     window.set_cursor_visible(false);
 

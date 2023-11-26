@@ -1,26 +1,27 @@
 pub mod render;
 
+use std::sync::Arc;
+
 use wgpu::{
     Device, DeviceDescriptor, Features, Instance, Limits, PowerPreference, PresentMode, Queue,
     RequestAdapterOptions, Surface, SurfaceCapabilities, SurfaceConfiguration, TextureUsages,
 };
 use winit::{dpi::PhysicalSize, window::Window};
 
-pub struct Gfx {
-    pub surface: Surface,
+pub struct Gfx<'win> {
+    pub surface: Surface<'win>,
     pub device: Device,
     pub queue: Queue,
     pub config: SurfaceConfiguration,
 }
 
-impl Gfx {
-    pub async fn new(window: &Window) -> Self {
+impl<'win> Gfx<'win> {
+    pub async fn new(window: Arc<Window>) -> Self {
         let instance = Instance::default();
-        let surface = unsafe { instance.create_surface(&window) }.unwrap();
+        let surface = instance.create_surface(window.clone()).unwrap();
 
         let options = RequestAdapterOptions {
-            //power_preference: PowerPreference::HighPerformance,
-            power_preference: PowerPreference::LowPower,
+            power_preference: PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         };
