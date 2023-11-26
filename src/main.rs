@@ -48,12 +48,13 @@ const MAX_DISTANCE: usize = 12;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
-const BINDINGS: [(Input, Action); 24] = [
+const BINDINGS: [(Input, Action); 25] = [
     (Input::Motion,                      Action::Turn),
     (Input::Close,                       Action::Exit),
     (Input::Press(KeyCode::Escape),      Action::Exit),
     (Input::Press(KeyCode::KeyQ),        Action::Exit),
     (Input::Press(KeyCode::KeyF),        Action::Debug("toggle wireframe")),
+    (Input::Press(KeyCode::KeyV),        Action::Debug("toggle vsync")),
     (Input::Press(KeyCode::KeyE),        Action::Debug("reload packs")),
     (Input::Press(KeyCode::Backquote),   Action::Debug("switch packs")),
     (Input::Press(KeyCode::Tab),         Action::Fullscreen),
@@ -173,6 +174,10 @@ async fn main() {
 
             Action::Debug("toggle wireframe") => {
                 wireframe = !wireframe;
+            }
+
+            Action::Debug("toggle vsync") => {
+                gfx.toggle_vsync();
             }
 
             Action::Debug("reload packs") => {

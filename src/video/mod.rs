@@ -77,4 +77,14 @@ impl Gfx {
             self.surface.configure(&self.device, &self.config);
         }
     }
+
+    pub fn toggle_vsync(&mut self) {
+        self.config.present_mode = match self.config.present_mode {
+            PresentMode::AutoVsync => PresentMode::AutoNoVsync,
+            PresentMode::AutoNoVsync => PresentMode::AutoVsync,
+            _ => unreachable!(),
+        };
+
+        self.surface.configure(&self.device, &self.config);
+    }
 }
