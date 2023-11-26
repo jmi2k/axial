@@ -38,7 +38,7 @@ impl Terraformer {
 
 fn spawn(seed: u64, chunk_tx: Sender<(IVec3, Chunk, Box<Layer<i32, 32>>)>) -> Sender<IVec3> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let perlins = array::from_fn::<_, 2, _>(|_| Perlin::new(rng.next_u32()));
+    let perlins = array::from_fn::<_, 3, _>(|_| Perlin::new(rng.next_u32()));
     let (location_tx, location_rx) = mpsc::channel();
 
     thread::spawn(move || for location in location_rx { 
@@ -80,7 +80,7 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
                 continue;
             }
 
-            let noises = array::from_fn::<_, 2, _>(|idx| {
+            let terrain_noises = array::from_fn::<_, 2, _>(|idx| {
                 let scale = 10f64.powi(idx as _);
                 let damp = 0.45 / scale;
                 let x = x as f64 * factor * scale;
@@ -89,9 +89,17 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
                 perlins[idx].get([x, y, z]) * damp
             });
 
-            let sample = 0.5 + noises.into_iter().sum::<f64>();
+            let cave_sample = {
+                let scale = 10f64;
+                let x = x as f64 * factor * scale;
+                let y = y as f64 * factor * scale;
+                let z = z as f64 * factor * scale;
+                perlins[2].get([x, y, z])
+            };
 
-            if sample * z as f64 > 8. {
+            let terrain_sample = 0.5 + terrain_noises.into_iter().sum::<f64>();
+
+            if terrain_sample * z as f64 > 8. || cave_sample > 0.5 {
                 let block = match z {
                     16.. => air,
                     15 => water_surface,
