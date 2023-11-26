@@ -109,26 +109,12 @@ async fn main() {
     let mut pladec_queue = ArrayVec::<bool, 16>::new();
     let mut selected_block = 1;
 
-    // let mut generating = HashSet::<IVec3>::new();
-    // {
-    //     let mut chunk = chunk::Chunk::new();
-    //     for z in 0..3 {
-    //     for y in 0..3 {
-    //     for x in 0..3 {
-    //         chunk.place(IVec3 { x, y, z }, 2);
-    //     }
-    //     }
-    //     }
-    //     world.load(IVec3::NEG_Z, chunk);
-    // }
-
     let mut reached_face = None;
 
-    let _ = event_loop.run(move |event, target| {
+    let _ = event_loop.run(move |event, _| {
         match event_handler.handle(event) {
             Action::Exit => {
                 process::exit(0);
-                target.exit();
             }
 
             Action::Fullscreen if window.fullscreen().is_none() => {
@@ -213,7 +199,7 @@ async fn main() {
         {
         optick::event!("receive");
 
-        while let Ok((location, chunk)) = terraformer.chunk_rx().try_recv() {
+        while let Ok((location, chunk, _)) = terraformer.chunk_rx().try_recv() {
             world.load(location, chunk);
             generating.remove(&location);
         }
@@ -457,23 +443,14 @@ async fn main() {
                     };
 
                     let translucent = (6..=7).contains(&block);
+                    let neighbor_loc = fine_loc + block_loc + side.map_or(IVec3::ZERO, IVec3::from);
+                    let neighbor = world.block(neighbor_loc).unwrap_or(0);
 
-                    // jmi2k: ugly...
-                    let culled = 'here: {
-                        let Some(direction) = side else {
-                            break 'here false;
-                        };
-
-                        let neighbor_loc = block_loc + IVec3::from(direction);
-                        let block_loc = chunk::mask_block_loc(neighbor_loc);
-
-                        let neighbor = match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
-                            (-1, _) | (_, 32) => neighbor_chunks[direction].map(|chunk| chunk[block_loc]).unwrap_or(0),
-                            _ => chunk[block_loc],
-                        };
-
-                        (1..=3).contains(&neighbor) || ((6..=7).contains(&block) && (6..=7).contains(&neighbor)) || (9..=11).contains(&neighbor)
-                    };
+                    let culled = side.is_some() && (
+                        (1..=3).contains(&neighbor)
+                        || ((6..=7).contains(&block) && (6..=7).contains(&neighbor))
+                        || (9..=11).contains(&neighbor)
+                    );
 
                     // Skip hidden faces
                     if culled {

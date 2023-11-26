@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    sync::atomic::{AtomicU64, Ordering}, array, ptr::{self, addr_of_mut}, mem::MaybeUninit,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use glam::IVec3;
 
-use crate::{chunk::{self, Chunk}, types::Cube};
+use crate::{chunk::{self, Chunk}, types::Layer};
 
 pub struct World {
     next_tick: AtomicU64,
@@ -66,5 +66,11 @@ impl World {
         if let Some(chunk) = self.chunk_mut(chunk_loc) {
             chunk.destroy(block_loc);
         }
+    }
+
+    pub fn block(&self, location: IVec3) -> Option<i16> {
+        let (chunk_loc, block_loc) = chunk::split_loc(location);
+        let chunk = self.chunk(chunk_loc)?;
+        Some(chunk[block_loc])
     }
 }

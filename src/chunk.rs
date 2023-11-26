@@ -3,15 +3,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering}, num::NonZeroU64,
 };
 
-use glam::IVec3;
+use glam::{IVec3, IVec2};
 
-use crate::types::{Cube, SideMap};
+use crate::types::{Cube, SideMap, Layer};
 
 static NONCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct Chunk {
     nonces: SideMap<NonZeroU64>,
     num_blocks: u16,
+    heights: Box<Layer<i8, 32>>,
     indices: Option<Box<Cube<i16, 32>>>,
 }
 
@@ -25,6 +26,18 @@ impl Chunk {
             // Location is already masked into range
             indices
                 .get_unchecked_mut(z as usize)
+                .get_unchecked_mut(y as usize)
+                .get_unchecked_mut(x as usize)
+        }
+    }
+
+    fn height_mut(&mut self, index: IVec2) -> &mut i8 {
+        // jmi2k: hack
+        let IVec3 { x, y, .. } = mask_block_loc(index.extend(0));
+
+        unsafe {
+            // Location is already masked into range
+            self.heights
                 .get_unchecked_mut(y as usize)
                 .get_unchecked_mut(x as usize)
         }
@@ -52,14 +65,6 @@ impl Chunk {
         }
     }
 
-    pub fn nonces(&self) -> &SideMap<NonZeroU64> {
-        &self.nonces
-    }
-
-    pub fn num_blocks(&self) -> u16 {
-        self.num_blocks
-    }
-
     fn alloc_indices(&mut self) {
         let indices = unsafe {
             // 0 is always a valid block ID, hardcoded as "air"
@@ -73,23 +78,61 @@ impl Chunk {
         Self {
             nonces: SideMap::from_fn(|_| fresh_nonce()),
             num_blocks: 0,
+            heights: Box::new([[-1; 32]; 32]),
             indices: None,
         }
     }
 
+    pub fn nonces(&self) -> &SideMap<NonZeroU64> {
+        &self.nonces
+    }
+
+    pub fn num_blocks(&self) -> u16 {
+        self.num_blocks
+    }
+
+    pub fn height(&self, index: IVec2) -> i8 {
+        // jmi2k: hack
+        let IVec3 { x, y, .. } = mask_block_loc(index.extend(0));
+
+        unsafe {
+            // Location is already masked into range
+            *self.heights
+                .get_unchecked(y as usize)
+                .get_unchecked(x as usize)
+        }
+    }
+
     pub fn place(&mut self, location: IVec3, block: i16) {
+        let IVec3 { x, y, z } = location;
+        let height_loc = IVec2 { x, y };
         let last_block = self[location];
         *self.block_mut(location) = block;
-
         self.update_nonces(location);
+
+        // jmi2k: be more specific with he kind of blocks influencing these fields
+        if block != 0 && self.height(height_loc) < z as i8 {
+            *self.height_mut(height_loc) = z as i8;
+        }
+
         self.num_blocks += (last_block != 0) as u16 - (block != 0) as u16;
     }
 
     pub fn destroy(&mut self, location: IVec3) {
+        let IVec3 { x, y, z } = location;
+        let height_loc = IVec2 { x, y };
         let last_block = self[location];
         *self.block_mut(location) = 0;
-
         self.update_nonces(location);
+
+        // jmi2k: be more specific with he kind of blocks influencing these fields
+        if self.height(height_loc) == z as i8 {
+            *self.height_mut(height_loc) = (0..z)
+                .rev()
+                .find(|h| self[IVec3::new(x, y, *h)] != 0)
+                .unwrap_or(-1) as i8;
+        }
+
         self.num_blocks -= (last_block != 0) as u16;
     }
 

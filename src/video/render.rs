@@ -175,16 +175,28 @@ impl Renderer {
                 buffers: &[VERTEX_LAYOUT],
             };
 
-            let target = ColorTargetState {
+            let solid_target = ColorTargetState {
+                format: ctx.config.format,
+                blend: Some(BlendState::REPLACE),
+                write_mask: ColorWrites::ALL,
+            };
+
+            let alpha_target = ColorTargetState {
                 format: ctx.config.format,
                 blend: Some(BlendState::ALPHA_BLENDING),
                 write_mask: ColorWrites::ALL,
             };
 
-            let fragment = FragmentState {
+            let solid_fragment = FragmentState {
                 module: &shader,
                 entry_point: "frag_main",
-                targets: &[Some(target)],
+                targets: &[Some(solid_target)],
+            };
+
+            let alpha_fragment = FragmentState {
+                module: &shader,
+                entry_point: "frag_main",
+                targets: &[Some(alpha_target)],
             };
 
             let solid_depth_stencil = DepthStencilState {
@@ -208,7 +220,7 @@ impl Renderer {
                 layout: Some(&layout),
                 primitive: poly_primitive,
                 vertex: vertex.clone(),
-                fragment: Some(fragment.clone()),
+                fragment: Some(solid_fragment.clone()),
                 depth_stencil: Some(solid_depth_stencil.clone()),
                 multisample: MultisampleState::default(),
                 multiview: None,
@@ -219,7 +231,7 @@ impl Renderer {
                 layout: Some(&layout),
                 primitive: poly_primitive,
                 vertex: vertex.clone(),
-                fragment: Some(fragment.clone()),
+                fragment: Some(alpha_fragment),
                 depth_stencil: Some(alpha_depth_stencil.clone()),
                 multisample: MultisampleState::default(),
                 multiview: None,
@@ -230,7 +242,7 @@ impl Renderer {
                 layout: Some(&layout),
                 primitive: wire_primitive,
                 vertex,
-                fragment: Some(fragment),
+                fragment: Some(solid_fragment),
                 depth_stencil: Some(solid_depth_stencil),
                 multisample: MultisampleState::default(),
                 multiview: None,

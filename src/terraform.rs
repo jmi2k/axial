@@ -9,13 +9,13 @@ use glam::IVec3;
 use noise::{NoiseFn, Perlin};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-use crate::chunk::{self, Chunk};
+use crate::{chunk::{self, Chunk}, types::Layer};
 
 const NUM_THREADS: usize = 4;
 
 pub struct Terraformer {
     location_tx: [Sender<IVec3>; NUM_THREADS],
-    chunk_rx: Receiver<(IVec3, Chunk)>,
+    chunk_rx: Receiver<(IVec3, Chunk, Box<Layer<i32, 32>>)>,
 }
 
 impl Terraformer {
@@ -26,7 +26,7 @@ impl Terraformer {
         Self { location_tx, chunk_rx }
     }
 
-    pub fn chunk_rx(&self) -> &Receiver<(IVec3, Chunk)> {
+    pub fn chunk_rx(&self) -> &Receiver<(IVec3, Chunk, Box<Layer<i32, 32>>)> {
         &self.chunk_rx
     }
 
@@ -36,21 +36,22 @@ impl Terraformer {
     }
 }
 
-fn spawn(seed: u64, chunk_tx: Sender<(IVec3, Chunk)>) -> Sender<IVec3> {
+fn spawn(seed: u64, chunk_tx: Sender<(IVec3, Chunk, Box<Layer<i32, 32>>)>) -> Sender<IVec3> {
     let mut rng = StdRng::seed_from_u64(seed);
     let perlins = array::from_fn::<_, 2, _>(|_| Perlin::new(rng.next_u32()));
     let (location_tx, location_rx) = mpsc::channel();
 
     thread::spawn(move || for location in location_rx { 
-        let chunk = terraform(location, &perlins);
-        let _ = chunk_tx.send((location, chunk));
+        let (chunk, height_map) = terraform(location, &perlins);
+        let _ = chunk_tx.send((location, chunk, height_map));
     });
 
     location_tx
 }
 
-fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
+fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>) {
     let mut chunk = Chunk::new();
+    let mut light_map = Box::<Layer<_, 32>>::default();
     let mut overflow = Chunk::new();
 
     let air = 0;
@@ -115,11 +116,16 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> Chunk {
             };
 
             chunk.place(block_loc, block);
+
+            if block != air && shift == IVec3::ZERO && light_map[block_loc.y as usize][block_loc.x as usize] < z {
+                light_map[block_loc.y as usize][block_loc.x as usize] = z;
+            }
+
             accumulator += 1;
         }
     }
     }
 
-    chunk
+    (chunk, light_map)
 }
 
