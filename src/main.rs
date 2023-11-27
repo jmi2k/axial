@@ -347,6 +347,7 @@ async fn main() {
         for k in (z - max_distance .. z + max_distance).rev() {
         for j in y - max_distance .. y + max_distance {
         for i in x - max_distance .. x + max_distance {
+            optick::event!("mesh single chunk");
             let chunk_loc = IVec3::new(i, j, k);
             let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
             let distance = pov.position.distance(fine_loc.as_vec3());
@@ -443,8 +444,21 @@ async fn main() {
                     };
 
                     let translucent = (6..=7).contains(&block);
-                    let neighbor_loc = fine_loc + block_loc + side.map_or(IVec3::ZERO, IVec3::from);
-                    let neighbor = world.block(neighbor_loc).unwrap_or(0);
+
+                    // jmi2k: ugly...
+                    let neighbor = 'here: {
+                        let Some(direction) = side else {
+                            break 'here 0;
+                        };
+
+                        let neighbor_loc = block_loc + IVec3::from(direction);
+                        let block_loc = chunk::mask_block_loc(neighbor_loc);
+
+                        match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
+                            (-1, _) | (_, 32) => neighbor_chunks[direction].map(|chunk| chunk[block_loc]).unwrap_or(0),
+                            _ => chunk[block_loc],
+                        }
+                    };
 
                     let culled = side.is_some() && (
                         (1..=3).contains(&neighbor)
@@ -470,7 +484,6 @@ async fn main() {
                         //
                         // The face extension is done at the reference level.
                         // This is possible because the faces are canonicalized.
-                        //if false {
                         if last_face == Some((idx, sky_exposure)) {
                             let quad_ref = mesh.last_mut().unwrap();
                             render::extend_quad_ref(quad_ref, Δblock);
