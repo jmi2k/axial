@@ -7,7 +7,7 @@ edition = "2021"
 ahash = "0.8"
 arrayvec = "0.7"
 noise = "0.8"
-optick = "1.3"
+#optick = "1.3"
 rand = "0.8"
 ron = "0.8"
 wgpu = { git = "https://github.com/gfx-rs/wgpu" }

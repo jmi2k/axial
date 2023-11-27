@@ -196,28 +196,17 @@ async fn main() {
         let (chunk_loc, _) = chunk::split_loc(pov.position.as_ivec3());
         let IVec3 { x, y, z } = chunk_loc;
 
-        {
-        optick::event!("receive");
-
         while let Ok((location, chunk, _)) = terraformer.chunk_rx().try_recv() {
             world.load(location, chunk);
             generating.remove(&location);
-        }
-
         }
 
         let max_distance = MAX_DISTANCE as i32;
 
         let aim2 = Quat::from_euler(EulerRot::ZXY, -pov.yaw, -pov.pitch, 0.) * Vec3::Y;
 
-        {
-        optick::event!("tick");
-
         // jmi2k: this takes too long
         while accrued_time >= TICK_DURATION {
-            {
-            optick::event!("generate");
-
             #[rustfmt::skip]
             for k in z - max_distance .. z + max_distance {
             for j in y - max_distance .. y + max_distance {
@@ -237,15 +226,10 @@ async fn main() {
             }
             }
 
-            }
-
             // jmi2k: moar crap
             pov.position += aim * if sprint { 4e-1 } else { 2e-1 };
             // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
-            let time = {
-                optick::event!("world tick");
-                world.tick()
-            };
+            let time = world.tick();
 
             if let Some((location, direction)) = reached_face {
                 //let mut world = world::<1>::new(&mut world);
@@ -265,8 +249,6 @@ async fn main() {
             }
 
             accrued_time -= TICK_DURATION;
-        }
-
         }
 
         let (mut x, mut y, mut z) = pov.position.as_ivec3().into();
@@ -339,15 +321,11 @@ async fn main() {
         let then = Instant::now();
         let IVec3 { x, y, z } = chunk_loc;
 
-        {
-        optick::event!("mesh");
-
         #[rustfmt::skip]
         'mesh:
         for k in (z - max_distance .. z + max_distance).rev() {
         for j in y - max_distance .. y + max_distance {
         for i in x - max_distance .. x + max_distance {
-            optick::event!("mesh single chunk");
             let chunk_loc = IVec3::new(i, j, k);
             let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
             let distance = pov.position.distance(fine_loc.as_vec3());
@@ -507,17 +485,13 @@ async fn main() {
         }
         }
 
-        }
-
         let target = pov.position + aim * if sprint { 4e-1 } else { 2e-1 };
         let pov_interpolated = Pov {
             position: Vec3::lerp(pov.position, target, accrued_time.as_secs_f32() / TICK_DURATION.as_secs_f32()),
             ..pov
         };
 
-        optick::event!("gpu");
         renderer.render(&gfx, /*&world,*/ &pov_interpolated, reached_face, MAX_DISTANCE, wireframe);
-        optick::next_frame();
         redraw = false;
     });
 }
