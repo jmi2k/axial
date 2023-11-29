@@ -9,6 +9,15 @@ pub struct Pov {
     pub pitch: f32,
 }
 
+impl Pov {
+    pub fn lerp(&self, target: Vec3, ratio: f32) -> Self {
+        Self {
+            position: self.position.lerp(target, ratio),
+            ..*self
+        }
+    }
+}
+
 impl From<&Pov> for Mat4 {
     fn from(pov: &Pov) -> Self {
         let z_up = Mat4::from_rotation_x(-FRAC_PI_2);

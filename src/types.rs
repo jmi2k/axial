@@ -131,6 +131,28 @@ impl<T> SideMap<T> {
             none: cb(None),
         }
     }
+
+    pub fn map(self, mut cb: impl FnMut(T) -> T) -> Self {
+        SideMap {
+            west: cb(self.west),
+            east: cb(self.east),
+            south: cb(self.south),
+            north: cb(self.north),
+            down: cb(self.down),
+            up: cb(self.up),
+            none: cb(self.none),
+        }
+    }
+
+    pub fn all(&self, mut pred: impl FnMut(&T) -> bool) -> bool {
+        pred(&self.none)
+            && pred(&self.west)
+            && pred(&self.east)
+            && pred(&self.south)
+            && pred(&self.north)
+            && pred(&self.down)
+            && pred(&self.up)
+    }
 }
 
 // jmi2k: ugly...

@@ -9,6 +9,7 @@
 mod asset;
 mod chunk;
 mod event;
+mod mesh;
 mod pov;
 mod terraform;
 mod types;
@@ -17,18 +18,20 @@ mod world;
 
 use std::{
     mem,
-    time::{Duration, Instant}, collections::HashSet, process, sync::Arc,
+    time::{Duration, Instant}, collections::HashSet, process, sync::Arc, ops::Neg,
 };
 
 use arrayvec::ArrayVec;
 use asset::Pack;
+use chunk::Chunk;
 use event::{Action, Handler, Input};
 use glam::{IVec3, Quat, Vec3, EulerRot};
+use mesh::Mesher;
 use pov::Pov;
 use terraform::Terraformer;
 use types::{Direction, SIDES, DirMap, SideMap};
 use video::{
-    render::{self, Renderer},
+    render::{self, Renderer, QuadRef},
     Gfx,
 };
 use winit::{
@@ -39,7 +42,8 @@ use winit::{
 };
 use world::World;
 
-const MAX_DISTANCE: usize = 12;
+const MAX_DISTANCE: usize = 8;
+const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
@@ -103,8 +107,7 @@ async fn main() {
     // jmi2k: crap
     #[allow(clippy::unusual_byte_groupings, reason = "digits form words")]
     let terraformer = Terraformer::new(0xA11_1DEA5_FA11_DEAD);
-    let mut mesh = vec![];
-    let mut alpha_mesh = vec![];
+    let mut mesher = Mesher::new();
     let mut generating = HashSet::new();
     let mut pladec_queue = ArrayVec::<bool, 16>::new();
     let mut selected_block = 1;
@@ -112,6 +115,7 @@ async fn main() {
     let mut reached_face = None;
 
     let _ = event_loop.run(move |event, _| {
+        // Process user input
         match event_handler.handle(event) {
             Action::Exit => {
                 process::exit(0);
@@ -187,6 +191,7 @@ async fn main() {
             _ => {}
         }
 
+        // Collect time
         let now = Instant::now();
         accrued_time += now - then;
         then = now;
@@ -202,8 +207,6 @@ async fn main() {
         }
 
         let max_distance = MAX_DISTANCE as i32;
-
-        let aim2 = Quat::from_euler(EulerRot::ZXY, -pov.yaw, -pov.pitch, 0.) * Vec3::Y;
 
         // jmi2k: this takes too long
         while accrued_time >= TICK_DURATION {
@@ -229,7 +232,7 @@ async fn main() {
             // jmi2k: moar crap
             pov.position += aim * if sprint { 4e-1 } else { 2e-1 };
             // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
-            let time = world.tick();
+            world.tick();
 
             if let Some((location, direction)) = reached_face {
                 //let mut world = world::<1>::new(&mut world);
@@ -243,83 +246,16 @@ async fn main() {
             }
 
             pladec_queue.clear();
-
-            if time % 32 == 0 {
-                eprintln!("position: {:?}   reach: {:?}", pov.position.as_ivec3(), reached_face);
-            }
-
             accrued_time -= TICK_DURATION;
         }
 
-        let (mut x, mut y, mut z) = pov.position.as_ivec3().into();
-        let (sx, sy, sz) = aim2.signum().as_ivec3().into();
-        let (dx, dy, dz) = (IVec3::new(sx, sy, sz).as_vec3() / aim2).into();
-        let i = (IVec3::new(x, y, z) + IVec3::new(sx, sy, sz)).as_vec3() - pov.position;
-        let (mut tx, mut ty, mut tz) = (i / aim2).into();
-        let mut block = 0;
-        let mut direction = Direction::Up;
-
-        loop {
-            if tx < ty {
-                if tx < tz {
-                    x += sx;
-                    tx += dx;
-                    direction = if aim2.x < 0. { Direction::East } else { Direction::West };
-                } else {
-                    z += sz;
-                    tz += dz;
-                    direction = if aim2.z < 0. { Direction::Up } else { Direction::Down };
-                }
-            } else {
-                if ty < tz {
-                    y += sy;
-                    ty += dy;
-                    direction = if aim2.y < 0. { Direction::North } else { Direction::South };
-                } else {
-                    z += sz;
-                    tz += dz;
-                    direction = if aim2.z < 0. { Direction::Up } else { Direction::Down };
-                }
-            }
-
-            if (Vec3::new(tx, ty, tz) * aim2).length() > 10. {
-                break;
-            }
-
-            let (chunk_loc, block_loc) = chunk::split_loc(IVec3 { x, y, z });
-            let Some(chunk) = world.chunk(chunk_loc) else { break; };
-            block = chunk[block_loc];
-
-            if ![0, 6, 7].contains(&block) {
-                break;
-            }
-        }
-
-        reached_face = if ![0, 6, 7].contains(&block) { Some((IVec3 { x, y, z }, direction)) } else { None };
+        reached_face = cast_ray(&mut world, &pov);
 
         if !redraw {
             return;
         }
 
-        // jmi2k: crap crap crap
-
-        let models = [ 
-            None,
-            pack.model("grass"),
-            pack.model("dirt"),
-            pack.model("stone"),
-            pack.model("wheat_0"),
-            pack.model("wheat"),
-            pack.model("water"),
-            pack.model("water_surface"),
-            pack.model("glass"),
-            pack.model("sand"),
-            pack.model("wood"),
-            pack.model("leaves"),
-        ];
-
         let then = Instant::now();
-        let IVec3 { x, y, z } = chunk_loc;
 
         #[rustfmt::skip]
         'mesh:
@@ -330,11 +266,6 @@ async fn main() {
             let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
             let distance = pov.position.distance(fine_loc.as_vec3());
             let max_distance = MAX_DISTANCE as f32 * 32.;
-
-            // Early continue if there is no chunk
-            let Some(chunk) = world.chunk(chunk_loc) else {
-                continue;
-            };
 
             // Unload far away chunks
             if distance > max_distance {
@@ -351,132 +282,21 @@ async fn main() {
                 continue;
             }
 
-            let neighbor_chunks = DirMap {
-                west: world.chunk(chunk_loc - IVec3::X),
-                east: world.chunk(chunk_loc + IVec3::X),
-                south: world.chunk(chunk_loc - IVec3::Y),
-                north: world.chunk(chunk_loc + IVec3::Y),
-                down: world.chunk(chunk_loc - IVec3::Z),
-                up: world.chunk(chunk_loc + IVec3::Z),
-            };
+            let neighbor_chunks = SideMap::from_fn(|side| {
+                let Δ = side.map(IVec3::from).unwrap_or(IVec3::ZERO);
+                world.chunk(chunk_loc + Δ)
+            });
 
-            let neighborhood_nonces = SideMap {
-                west: neighbor_chunks.west.map(|chunk| chunk.nonces().east),
-                east: neighbor_chunks.east.map(|chunk| chunk.nonces().west),
-                south: neighbor_chunks.south.map(|chunk| chunk.nonces().north),
-                north: neighbor_chunks.north.map(|chunk| chunk.nonces().south),
-                down: neighbor_chunks.down.map(|chunk| chunk.nonces().up),
-                up: neighbor_chunks.up.map(|chunk| chunk.nonces().down),
-                none: Some(chunk.nonces().none),
-            };
+            let neighbor_nonces = SideMap::from_fn(|side| {
+                let opposite_side = side.map(Neg::neg);
+                neighbor_chunks[side].map(|chunk| chunk.nonces()[opposite_side])
+            });
 
             // Discard already meshed chunks immediately
-            if renderer.has_mesh(chunk_loc, &neighborhood_nonces) { continue; }
+            if renderer.has_mesh(chunk_loc, &neighbor_nonces) { continue; }
 
-            // Discard enclosed chunks immediately
-            // jmi2k: can be improved, and also must take into account whether the player is inside
-            if neighbor_chunks.west.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-                && neighbor_chunks.east.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-                && neighbor_chunks.south.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-                && neighbor_chunks.north.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-                && neighbor_chunks.down.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-                && neighbor_chunks.up.map(|chunk| chunk.num_blocks() == 32_768).unwrap_or(false)
-            {
-                renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &[], &[]);
-                continue;
-            }
-
-            mesh.clear();
-            alpha_mesh.clear();
-
-            for side in SIDES {
-                #[rustfmt::skip]
-                let (Δlayer, Δrow, Δblock) = match side {
-                    Some(Direction::West) =>  (IVec3::X, IVec3::Y, IVec3::Z),
-                    Some(Direction::East) =>  (IVec3::X, IVec3::Z, IVec3::Y),
-                    Some(Direction::South) => (IVec3::Y, IVec3::Z, IVec3::X),
-                    Some(Direction::North) => (IVec3::Y, IVec3::X, IVec3::Z),
-                    Some(Direction::Down) =>  (IVec3::Z, IVec3::X, IVec3::Y),
-                    Some(Direction::Up) =>    (IVec3::Z, IVec3::Y, IVec3::X),
-                    None =>                   (IVec3::Z, IVec3::Y, IVec3::X),
-                };
-
-                for a in 0..32 {
-                for b in 0..32 {
-                    let mut last_face = None;
-                for c in 0..32 {
-                    // Traverse chunk following the current side's canonical order
-                    let block_loc = a * Δlayer + b * Δrow + c * Δblock;
-                    let block = chunk[block_loc];
-
-                    // Skip invisible blocks
-                    let Some(model) = models[block as usize] else {
-                        last_face = None;
-                        continue;
-                    };
-
-                    // Skip empty faces
-                    let Some(range) = model.ranges[side].as_ref() else {
-                        last_face = None;
-                        continue;
-                    };
-
-                    let translucent = (6..=7).contains(&block);
-
-                    // jmi2k: ugly...
-                    let neighbor = 'here: {
-                        let Some(direction) = side else {
-                            break 'here 0;
-                        };
-
-                        let neighbor_loc = block_loc + IVec3::from(direction);
-                        let block_loc = chunk::mask_block_loc(neighbor_loc);
-
-                        match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
-                            (-1, _) | (_, 32) => neighbor_chunks[direction].map(|chunk| chunk[block_loc]).unwrap_or(0),
-                            _ => chunk[block_loc],
-                        }
-                    };
-
-                    let culled = side.is_some() && (
-                        (1..=3).contains(&neighbor)
-                        || ((6..=7).contains(&block) && (6..=7).contains(&neighbor))
-                        || (9..=11).contains(&neighbor)
-                    );
-
-                    // Skip hidden faces
-                    if culled {
-                        last_face = None;
-                        continue;
-                    }
-
-                    for idx in range.clone() {
-                        let sky_exposure = 15;
-                        let mesh = if translucent { &mut alpha_mesh } else { &mut mesh };
-
-                        // Simple inline 1D greedy meshing.
-                        //
-                        // This code will fail to optimize sides with more than 1 quad,
-                        // but this is an acceptable limitation
-                        // as those should not be optimized anyway.
-                        //
-                        // The face extension is done at the reference level.
-                        // This is possible because the faces are canonicalized.
-                        if last_face == Some((idx, sky_exposure)) {
-                            let quad_ref = mesh.last_mut().unwrap();
-                            render::extend_quad_ref(quad_ref, Δblock);
-                        } else {
-                            let quad_ref = render::quad_ref(idx, block_loc, translucent, sky_exposure);
-                            mesh.push(quad_ref);
-                            last_face = Some((idx, sky_exposure));
-                        }
-                    }
-                }
-                }
-                }
-            }
-
-            renderer.load_mesh(&gfx, chunk_loc, &neighborhood_nonces, &mesh, &alpha_mesh);
+            let (mesh, alpha_mesh) = mesher.mesh(&pack, &neighbor_chunks);
+            renderer.load_mesh(&gfx, chunk_loc, &neighbor_nonces, mesh, alpha_mesh);
 
             if then.elapsed() > Duration::from_micros(1500) {
                 break 'mesh;
@@ -485,13 +305,13 @@ async fn main() {
         }
         }
 
+        // Interpolate POV
         let target = pov.position + aim * if sprint { 4e-1 } else { 2e-1 };
-        let pov_interpolated = Pov {
-            position: Vec3::lerp(pov.position, target, accrued_time.as_secs_f32() / TICK_DURATION.as_secs_f32()),
-            ..pov
-        };
+        let ratio = accrued_time.as_secs_f32() / TICK_DURATION.as_secs_f32();
+        let pov = pov.lerp(target, ratio);
 
-        renderer.render(&gfx, /*&world,*/ &pov_interpolated, reached_face, MAX_DISTANCE, wireframe);
+        // Render next frame
+        renderer.render(&gfx, /*&world,*/ &pov, reached_face, MAX_DISTANCE, wireframe);
         redraw = false;
     });
 }
@@ -502,4 +322,49 @@ fn open_packs() -> (Pack, Pack) {
     // let alt_pack = asset::open("packs/exthard");
 
     (pack, alt_pack)
+}
+
+fn cast_ray(world: &mut World, pov: &Pov) -> Option<(IVec3, Direction)> {
+    let mut location = pov.position.as_ivec3();
+    let orientation = Quat::from_euler(EulerRot::ZXY, -pov.yaw, -pov.pitch, 0.);
+    let forward = orientation * Vec3::Y;
+    let step = forward.signum().as_ivec3();
+    let Δ = forward.signum() / forward;
+    let foo = location.as_vec3() + step.max(IVec3::ZERO).as_vec3() - pov.position;
+    let mut t = foo / forward;
+    let mut direction = Direction::Up;
+
+    loop {
+        if t.x < t.y {
+            if t.x < t.z {
+                location.x += step.x;
+                t.x += Δ.x;
+                direction = if forward.x < 0. { Direction::East } else { Direction::West };
+            } else {
+                location.z += step.z;
+                t.z += Δ.z;
+                direction = if forward.z < 0. { Direction::Up } else { Direction::Down };
+            }
+        } else {
+            if t.y < t.z {
+                location.y += step.y;
+                t.y += Δ.y;
+                direction = if forward.y < 0. { Direction::North } else { Direction::South };
+            } else {
+                location.z += step.z;
+                t.z += Δ.z;
+                direction = if forward.z < 0. { Direction::Up } else { Direction::Down };
+            }
+        }
+
+        if (t * forward).length() > MAX_REACH {
+            return None;
+        }
+
+        let block = world.block(location)?;
+
+        if ![0, 6, 7].contains(&block) {
+            return Some((location, direction));
+        }
+    }
 }

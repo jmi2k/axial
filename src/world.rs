@@ -5,7 +5,7 @@ use std::{
 
 use glam::IVec3;
 
-use crate::{chunk::{self, Chunk}, types::Layer};
+use crate::chunk::{self, Chunk};
 
 pub struct World {
     next_tick: AtomicU64,
