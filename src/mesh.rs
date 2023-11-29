@@ -262,6 +262,12 @@ impl Mesher {
             }
         }
 
+        // jmi2k: 2D greedy pass?
+        // Iterate over all quads,
+        // look for secondary coords differing by 1
+        // and merge.
+        // Double pointer could work
+
         (&self.solid_mesh, &self.alpha_mesh)
     }
 }

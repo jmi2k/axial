@@ -42,7 +42,7 @@ use winit::{
 };
 use world::World;
 
-const MAX_DISTANCE: usize = 24;
+const MAX_DISTANCE: usize = 12;
 const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 

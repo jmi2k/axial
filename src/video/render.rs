@@ -16,7 +16,7 @@ use wgpu::{
     RenderPipelineDescriptor, Sampler, SamplerDescriptor, ShaderStages, StencilState, StoreOp,
     SurfaceConfiguration, SurfaceTexture, Texture, TextureAspect, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode,
+    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode, IndexFormat,
 };
 
 use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction}};
@@ -93,7 +93,7 @@ const FRAME_SLOTS: &[BindGroupLayoutEntry; 1] = &[BindGroupLayoutEntry {
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
 pub type VertexRef = u64;
-pub type QuadRef = [VertexRef; 6];
+pub type QuadRef = [VertexRef; 4];
 
 struct GpuMesh {
     nonces: SideMap<Option<NonZeroU64>>,
@@ -117,6 +117,7 @@ pub struct Renderer {
     reach_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
     loaded_meshes: HashMap<IVec3, GpuMesh, ahash::RandomState>,
+    index_buffer: Buffer,
 }
 
 impl Renderer {
@@ -373,6 +374,7 @@ impl Renderer {
         };
 
         let (depth, frame) = build_frames(ctx);
+        let index_buffer = build_indices(ctx, 1_024);
         let sampler = ctx.device.create_sampler(&sampler_descriptor);
         let pack_group = build_pack_group(ctx, &pack_layout, pack, &sampler);
         let frame_group = build_frame_group(ctx, &frame_layout, &frame);
@@ -393,6 +395,7 @@ impl Renderer {
             reach_pipeline,
             post_pipeline,
             loaded_meshes: HashMap::default(),
+            index_buffer,
         }
     }
 
@@ -412,6 +415,13 @@ impl Renderer {
             Some(entry) if &entry.nonces == nonces => return,
             _ => {}
         };
+
+        let max_num_quads = usize::max(quads.len(), alpha_quads.len());
+        let current_num_quads = self.index_buffer.size() as usize / 4 / 6;
+
+        if current_num_quads < max_num_quads {
+            self.index_buffer = build_indices(ctx, max_num_quads.next_power_of_two());
+        }
 
         let vertex_buf = {
             let vertices = quads.flatten();
@@ -514,11 +524,13 @@ impl Renderer {
         pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 76, &time.to_ne_bytes());
+        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
 
         'render:
         for (location, mesh) in &self.loaded_meshes {
             let GpuMesh { vertex_buf, .. } = mesh;
             let num_vertices = vertex_buf.size() / VERTEX_LAYOUT.array_stride;
+            let num_indices = num_vertices / 4 * 6;
             let location = chunk::merge_loc(*location, IVec3::ZERO);
 
             if num_vertices == 0 {
@@ -534,7 +546,8 @@ impl Renderer {
 
             pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, vertex_buf.slice(..));
-            pass.draw(0..num_vertices as _, 0..1);
+            // jmi2k: What does base_vertex mean? 2nd parameter
+            pass.draw_indexed(0..num_indices as _, 0, 0..1);
         }
 
         pass.set_pipeline(alpha_pipeline);
@@ -543,6 +556,7 @@ impl Renderer {
         for (location, mesh) in &self.loaded_meshes {
             let GpuMesh { alpha_vertex_buf, .. } = mesh;
             let num_vertices = alpha_vertex_buf.size() / VERTEX_LAYOUT.array_stride;
+            let num_indices = num_vertices / 4 * 6;
             let location = chunk::merge_loc(*location, IVec3::ZERO);
 
             if num_vertices == 0 {
@@ -558,7 +572,8 @@ impl Renderer {
 
             pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
-            pass.draw(0..num_vertices as _, 0..1);
+            // jmi2k: What does base_vertex mean? 2nd parameter
+            pass.draw_indexed(0..num_indices as _, 0, 0..1);
         }
     }
 
@@ -660,7 +675,7 @@ impl Renderer {
 }
 
 pub fn quad_ref(base: usize, location: IVec3, translucent: bool, sky_exposure: u8) -> QuadRef {
-    let offsets = [0, 1, 2, 3, 2, 1];
+    let offsets = [0, 1, 2, 3/* , 2, 1 */];
     array::from_fn(|idx| vertex_ref(4 * base + offsets[idx], location, translucent, sky_exposure))
 }
 
@@ -688,6 +703,23 @@ fn vertex_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure: u
         | (location.z as u64) << 42
         | (translucent as u64) << 47
         | (sky_exposure as u64) << 48
+}
+
+fn build_indices(ctx: &Gfx, num_quads: usize) -> Buffer {
+    // jmi2k: try to make the indices 16-bit when switching to a suballocator
+    println!("rebuilding index buffer with {} quads", num_quads);
+
+    let indices = (0..num_quads)
+        .flat_map(|n| [0u32, 1, 2, 3, 2, 1].map(|idx| 4 * n as u32 + idx))
+        .collect::<Vec<_>>();
+
+    let descriptor = BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::cast_slice(&indices),
+        usage: BufferUsages::INDEX,
+    };
+
+    ctx.device.create_buffer_init(&descriptor)
 }
 
 fn build_frames(ctx: &Gfx) -> (Texture, Texture) {
