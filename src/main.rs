@@ -42,18 +42,19 @@ use winit::{
 };
 use world::World;
 
-const MAX_DISTANCE: usize = 8;
+const MAX_DISTANCE: usize = 24;
 const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
-const BINDINGS: [(Input, Action); 25] = [
+const BINDINGS: [(Input, Action); 26] = [
     (Input::Motion,                      Action::Turn),
     (Input::Close,                       Action::Exit),
     (Input::Press(KeyCode::Escape),      Action::Exit),
     (Input::Press(KeyCode::KeyQ),        Action::Exit),
     (Input::Press(KeyCode::KeyF),        Action::Debug("toggle wireframe")),
     (Input::Press(KeyCode::KeyV),        Action::Debug("toggle vsync")),
+    (Input::Press(KeyCode::KeyG),        Action::Debug("toggle greedy meshing")),
     (Input::Press(KeyCode::KeyE),        Action::Debug("reload packs")),
     (Input::Press(KeyCode::Backquote),   Action::Debug("switch packs")),
     (Input::Press(KeyCode::Tab),         Action::Fullscreen),
@@ -163,6 +164,11 @@ async fn main() {
 
             Action::Debug("toggle vsync") => {
                 gfx.toggle_vsync();
+            }
+
+            Action::Debug("toggle greedy meshing") => {
+                mesher.greedy_meshing = !mesher.greedy_meshing;
+                renderer.invalidate_meshes();
             }
 
             Action::Debug("reload packs") => {

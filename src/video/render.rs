@@ -398,8 +398,12 @@ impl Renderer {
 
     pub fn update_pack(&mut self, ctx: &Gfx, pack: &Pack) {
         self.pack_group = build_pack_group(ctx, &self.pack_layout, pack, &self.sampler);
-        self.loaded_meshes.clear();
+        self.invalidate_meshes();
         println!("load_meshes.len() = {}", self.loaded_meshes.len());
+    }
+
+    pub fn invalidate_meshes(&mut self) {
+        self.loaded_meshes.clear();
     }
 
     // jmi2k: accept a closure instead?
