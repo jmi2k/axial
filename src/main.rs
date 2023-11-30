@@ -47,7 +47,7 @@ const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
 #[rustfmt::skip]
-const BINDINGS: [(Input, Action); 26] = [
+const BINDINGS: [(Input, Action); 27] = [
     (Input::Motion,                      Action::Turn),
     (Input::Close,                       Action::Exit),
     (Input::Press(KeyCode::Escape),      Action::Exit),
@@ -73,6 +73,7 @@ const BINDINGS: [(Input, Action); 26] = [
     (Input::Unpress(KeyCode::ShiftLeft), Action::Stop(Direction::Down)),
     (Input::Click(MouseButton::Left),    Action::Debug("destroy block")),
     (Input::Click(MouseButton::Right),   Action::Debug("place block")),
+    (Input::Click(MouseButton::Middle),  Action::Debug("clone block")),
     (Input::Scroll,                      Action::Debug("change block")),
 ];
 
@@ -187,6 +188,12 @@ async fn main() {
 
             Action::Debug("destroy block") => {
                 pladec_queue.push(false);
+            }
+
+            Action::Debug("clone block") => {
+                if let Some((location, _)) = reached_face {
+                    selected_block = world.block(location).unwrap_or_default();
+                }
             }
 
             Action::Debug("change block") => {
