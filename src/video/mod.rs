@@ -35,7 +35,7 @@ impl<'win> Gfx<'win> {
 
         let descriptor = DeviceDescriptor {
             label: None,
-            features: Features::PUSH_CONSTANTS | Features::POLYGON_MODE_LINE,
+            features: Features::PUSH_CONSTANTS | Features::POLYGON_MODE_LINE | Features::MULTI_DRAW_INDIRECT | Features::INDIRECT_FIRST_INSTANCE,
             limits,
         };
 

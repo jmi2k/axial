@@ -4,7 +4,7 @@ use glam::{IVec3, Mat4, Vec4, Vec3};
 use image::RgbaImage;
 use wgpu::{
     include_wgsl,
-    util::{BufferInitDescriptor, DeviceExt},
+    util::{BufferInitDescriptor, DeviceExt, DrawIndexedIndirectArgs},
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
     Buffer, BufferBinding, BufferBindingType, BufferUsages, Color, ColorTargetState, ColorWrites,
@@ -16,13 +16,14 @@ use wgpu::{
     RenderPipelineDescriptor, Sampler, SamplerDescriptor, ShaderStages, StencilState, StoreOp,
     SurfaceConfiguration, SurfaceTexture, Texture, TextureAspect, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode, IndexFormat,
+    TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode, IndexFormat, BufferDescriptor,
 };
 
-use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction}};
+use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction, Cube}};
 
 use super::Gfx;
 
+const REGION_LEN: i32 = 2;
 const FOV: f32 = 90. * PI / 180.;
 const ZNEAR: f32 = 1e-2;
 const ZFAR: f32 = 1e4;
@@ -95,10 +96,225 @@ const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 pub type VertexRef = u64;
 pub type QuadRef = [VertexRef; 4];
 
-struct GpuMesh {
+#[derive(Default)]
+struct MeshRef {
     nonces: SideMap<Option<NonZeroU64>>,
+    offset: u32,
+    num_quads: u32,
+}
+
+impl MeshRef {
+    pub fn len(&self) -> u32 {
+        self.num_quads
+    }
+
+    pub fn end(&self) -> u32 {
+        self.offset + self.num_quads
+    }
+}
+
+struct Region {
+    meshes: Cube<MeshRef, {REGION_LEN as usize}>,
     vertex_buf: Buffer,
-    alpha_vertex_buf: Buffer,
+    indirect_buf: Buffer,
+    num_indirects: u32,
+}
+
+impl Region {
+    fn new(ctx: &Gfx) -> Self {
+        Self {
+            meshes: Cube::default(),
+            vertex_buf: alloc_vertex_buf(ctx, 0),
+            indirect_buf: alloc_indirect_buf(ctx),
+            num_indirects: 0,
+        }
+    }
+
+    fn len(&self) -> u32 {
+        (self.vertex_buf.size() / mem::size_of::<QuadRef>() as u64) as u32
+    }
+
+    fn mesh(&self, location: IVec3) -> &MeshRef {
+        let IVec3 { x, y, z } = mask_chunk_loc(location);
+
+        unsafe {
+            self.meshes
+                .get_unchecked(z as usize)
+                .get_unchecked(y as usize)
+                .get_unchecked(x as usize)
+        }
+    }
+
+    fn mesh_mut(&mut self, location: IVec3) -> &mut MeshRef {
+        let IVec3 { x, y, z } = mask_chunk_loc(location);
+
+        unsafe {
+            self.meshes
+                .get_unchecked_mut(z as usize)
+                .get_unchecked_mut(y as usize)
+                .get_unchecked_mut(x as usize)
+        }
+    }
+
+    fn write_indirects(&mut self, ctx: &Gfx) {
+        self.num_indirects = 0;
+
+        for z in 0..REGION_LEN {
+        for y in 0..REGION_LEN {
+        for x in 0..REGION_LEN {
+            let mesh = self.mesh(IVec3 { x, y, z });
+
+            if mesh.num_quads == 0 {
+                continue;
+            }
+
+            let instance = u32::from_ne_bytes([
+                x as u8,
+                y as u8,
+                z as u8,
+                0,
+            ]);
+
+            let indirect = DrawIndexedIndirectArgs {
+                index_count: 6 * mesh.num_quads,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: 4 * mesh.offset as i32,
+                first_instance: instance,
+            };
+
+            ctx.queue.write_buffer(&self.indirect_buf, (self.num_indirects as usize * mem::size_of::<DrawIndexedIndirectArgs>()) as u64, indirect.as_bytes());
+            self.num_indirects += 1;
+        }
+        }
+        }
+    }
+
+    fn load(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef]) {
+        const Q: u64 = mem::size_of::<QuadRef>() as u64;
+
+        let location = mask_chunk_loc(location);
+        let old_mesh = self.mesh(location);
+        let Δlen = quads.len() as u32 - old_mesh.len();
+
+        let start = location.z * REGION_LEN * REGION_LEN + location.y * REGION_LEN + location.x;
+        // println!("region={:p}\tstart={}\t\tself.len()={}\t\told_mesh.len()={}\told_mesh.end()={}\tquads.len()={}\tΔlen={}", self, start, self.len(), old_mesh.len(), old_mesh.end(), quads.len(), Δlen);
+
+        // Ignore no-ops on empty meshes
+        if quads.is_empty() && Δlen == 0 {
+            return;
+        }
+
+        let new_vertex_buf = alloc_vertex_buf(ctx, self.len() + Δlen);
+        let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor::default());
+
+        // Copy left remaining of buffer
+        // println!("First copy");
+        encoder.copy_buffer_to_buffer(
+            &self.vertex_buf,
+            0,
+            &new_vertex_buf,
+            0,
+            old_mesh.offset as u64 * Q);
+
+        // Copy right remaining of buffer
+        // println!("Second copy");
+        encoder.copy_buffer_to_buffer(
+            &self.vertex_buf,
+            old_mesh.end() as u64 * Q,
+            &new_vertex_buf,
+            (old_mesh.end() + Δlen) as u64 * Q,
+            (self.len() - old_mesh.end()) as u64 * Q);
+
+        let commands = encoder.finish();
+        ctx.queue.submit(iter::once(commands));
+
+        // Write quads to mesh gap
+        ctx.queue.write_buffer(
+            &new_vertex_buf,
+            old_mesh.offset as u64 * Q,
+            bytemuck::cast_slice(quads));
+
+        // Adjust mesh reference
+        let old_mesh = self.mesh_mut(location);
+        old_mesh.num_quads = quads.len() as _;
+        old_mesh.nonces = nonces.clone();
+
+        let flattened_meshes = self.meshes.flatten_mut().flatten_mut();
+        let start = location.z * REGION_LEN * REGION_LEN + location.y * REGION_LEN + location.x + 1;
+
+        // Adjust right offsets
+        for mesh in &mut flattened_meshes[start as usize..] {
+            mesh.offset += Δlen;
+        }
+
+        // print!("+++ ");
+
+        for mesh in flattened_meshes {
+            // print!("{} ", mesh.offset);
+        }
+
+        // println!();
+
+        self.write_indirects(ctx);
+
+        // Replace region vertex buffer
+        self.vertex_buf = new_vertex_buf;
+    }
+}
+
+fn mask_chunk_loc(location: IVec3) -> IVec3 {
+    debug_assert!(
+        location.min_element() >= -REGION_LEN && location.max_element() < REGION_LEN,
+        "chunk location out of region bounds",
+    );
+
+    location & (REGION_LEN - 1)
+}
+
+fn mask_region_loc(location: IVec3) -> IVec3 {
+    debug_assert!(
+        location.min_element() >= i32::MIN / 32 && location.max_element() <= i32::MAX / 32,
+        "region location out of world bounds",
+    );
+
+    location << REGION_LEN.trailing_zeros() >> REGION_LEN.trailing_zeros()
+}
+
+fn split_loc(location: IVec3) -> (IVec3, IVec3) {
+    let chunk_loc = location >> REGION_LEN.trailing_zeros();
+    let block_loc = location & (REGION_LEN - 1);
+
+    (chunk_loc, block_loc)
+}
+
+fn merge_loc(region_loc: IVec3, chunk_loc: IVec3) -> IVec3 {
+    let region_loc = mask_region_loc(region_loc);
+    let chunk_loc = mask_chunk_loc(chunk_loc);
+
+    region_loc << REGION_LEN.trailing_zeros() | chunk_loc
+}
+
+fn alloc_vertex_buf(ctx: &Gfx, num_quads: u32) -> Buffer {
+    let descriptor = BufferDescriptor {
+        label: None,
+        size: num_quads as u64 * mem::size_of::<QuadRef>() as u64,
+        usage: BufferUsages::VERTEX | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+
+    ctx.device.create_buffer(&descriptor)
+}
+
+fn alloc_indirect_buf(ctx: &Gfx) -> Buffer {
+    let descriptor = BufferDescriptor {
+        label: None,
+        size: (REGION_LEN * REGION_LEN * REGION_LEN) as u64 * mem::size_of::<DrawIndexedIndirectArgs>() as u64,
+        usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    };
+
+    ctx.device.create_buffer(&descriptor)
 }
 
 pub struct Renderer {
@@ -116,7 +332,7 @@ pub struct Renderer {
     wire_chunk_pipeline: RenderPipeline,
     reach_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
-    loaded_meshes: HashMap<IVec3, GpuMesh, ahash::RandomState>,
+    loaded_regions: HashMap<IVec3, Region, ahash::RandomState>,
     index_buffer: Buffer,
 }
 
@@ -374,7 +590,7 @@ impl Renderer {
         };
 
         let (depth, frame) = build_frames(ctx);
-        let index_buffer = build_indices(ctx, 1_024);
+        let index_buffer = build_indices(ctx, 131_072);
         let sampler = ctx.device.create_sampler(&sampler_descriptor);
         let pack_group = build_pack_group(ctx, &pack_layout, pack, &sampler);
         let frame_group = build_frame_group(ctx, &frame_layout, &frame);
@@ -394,7 +610,7 @@ impl Renderer {
             wire_chunk_pipeline,
             reach_pipeline,
             post_pipeline,
-            loaded_meshes: HashMap::default(),
+            loaded_regions: HashMap::default(),
             index_buffer,
         }
     }
@@ -402,69 +618,34 @@ impl Renderer {
     pub fn update_pack(&mut self, ctx: &Gfx, pack: &Pack) {
         self.pack_group = build_pack_group(ctx, &self.pack_layout, pack, &self.sampler);
         self.invalidate_meshes();
-        println!("load_meshes.len() = {}", self.loaded_meshes.len());
     }
 
     pub fn invalidate_meshes(&mut self) {
-        self.loaded_meshes.clear();
+        self.loaded_regions.clear();
     }
 
     // jmi2k: accept a closure instead?
     pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], alpha_quads: &[QuadRef]) {
-        match self.loaded_meshes.get(&location) {
-            Some(entry) if &entry.nonces == nonces => return,
-            _ => {}
-        };
+        let (region_loc, chunk_loc) = split_loc(location);
+        let region = self.loaded_regions.entry(region_loc).or_insert_with(|| Region::new(ctx));
+        region.load(ctx, chunk_loc, nonces, quads);
 
-        let max_num_quads = usize::max(quads.len(), alpha_quads.len());
         let current_num_quads = self.index_buffer.size() as usize / 4 / 6;
+        let max_num_quads = region.len() as _;
 
         if current_num_quads < max_num_quads {
             self.index_buffer = build_indices(ctx, max_num_quads.next_power_of_two());
         }
-
-        let vertex_buf = {
-            let vertices = quads.flatten();
-
-            let descriptor = BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(vertices),
-                usage: BufferUsages::VERTEX,
-            };
-
-            ctx.device.create_buffer_init(&descriptor)
-        };
-
-        let alpha_vertex_buf = {
-            let vertices = alpha_quads.flatten();
-
-            let descriptor = BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(vertices),
-                usage: BufferUsages::VERTEX,
-            };
-
-            ctx.device.create_buffer_init(&descriptor)
-        };
-
-        let entry = GpuMesh {
-            nonces: nonces.clone(),
-            vertex_buf,
-            alpha_vertex_buf,
-        };
-
-        self.loaded_meshes.insert(location, entry);
     }
 
     pub fn unload_mesh(&mut self, location: IVec3) {
-        self.loaded_meshes.remove(&location);
+        // self.loaded_meshes.remove(&location);
     }
 
     pub fn has_mesh(&self, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>) -> bool {
-        self.loaded_meshes
-            .get(&location)
-            .map(|entry| &entry.nonces == nonces)
-            .unwrap_or_default()
+        let (region_loc, chunk_loc) = split_loc(location);
+        let Some(region) = self.loaded_regions.get(&region_loc) else { return false; };
+        &region.mesh(chunk_loc).nonces == nonces
     }
 
     fn render_chunks(&mut self, encoder: &mut CommandEncoder, /*world: &World,*/ pov: &Pov, max_distance: usize, wireframe: bool) {
@@ -514,7 +695,7 @@ impl Renderer {
             xform.row(2),
         ];
 
-        let radius = f32::sqrt(3. * 32. * 32.);
+        let radius = f32::sqrt(3. * (32. + REGION_LEN as f32) * (32. * REGION_LEN as f32));
 
         let solid_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.poly_chunk_pipeline };
         let alpha_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.alpha_chunk_pipeline };
@@ -527,13 +708,11 @@ impl Renderer {
         pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
 
         'render:
-        for (location, mesh) in &self.loaded_meshes {
-            let GpuMesh { vertex_buf, .. } = mesh;
-            let num_vertices = vertex_buf.size() / VERTEX_LAYOUT.array_stride;
-            let num_indices = num_vertices / 4 * 6;
-            let location = chunk::merge_loc(*location, IVec3::ZERO);
+        for (location, mesh) in &self.loaded_regions {
+            let Region { vertex_buf, .. } = mesh;
+            let location = merge_loc(chunk::merge_loc(*location, IVec3::ZERO), IVec3::ZERO);
 
-            if num_vertices == 0 {
+            if vertex_buf.size() == 0 {
                 continue;
             }
 
@@ -546,35 +725,34 @@ impl Renderer {
 
             pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
             pass.set_vertex_buffer(0, vertex_buf.slice(..));
-            // jmi2k: What does base_vertex mean? 2nd parameter
-            pass.draw_indexed(0..num_indices as _, 0, 0..1);
+            pass.multi_draw_indexed_indirect(&mesh.indirect_buf, 0, mesh.num_indirects);
         }
 
         pass.set_pipeline(alpha_pipeline);
 
-        'render:
-        for (location, mesh) in &self.loaded_meshes {
-            let GpuMesh { alpha_vertex_buf, .. } = mesh;
-            let num_vertices = alpha_vertex_buf.size() / VERTEX_LAYOUT.array_stride;
-            let num_indices = num_vertices / 4 * 6;
-            let location = chunk::merge_loc(*location, IVec3::ZERO);
+        // 'render:
+        // for (location, mesh) in &self.loaded_meshes {
+        //     let GpuMesh { alpha_vertex_buf, .. } = mesh;
+        //     let num_vertices = alpha_vertex_buf.size() / VERTEX_LAYOUT.array_stride;
+        //     let num_indices = num_vertices / 4 * 6;
+        //     let location = chunk::merge_loc(*location, IVec3::ZERO);
 
-            if num_vertices == 0 {
-                continue;
-            }
+        //     if num_vertices == 0 {
+        //         continue;
+        //     }
 
-            let center = (location + 16).as_vec3();
+        //     let center = (location + 16).as_vec3();
 
-            for plane in planes {
-                let spherical_distance = center.dot(plane.truncate()) + plane.w;
-                if spherical_distance < -radius { continue 'render; }
-            }
+        //     for plane in planes {
+        //         let spherical_distance = center.dot(plane.truncate()) + plane.w;
+        //         if spherical_distance < -radius { continue 'render; }
+        //     }
 
-            pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
-            pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
-            // jmi2k: What does base_vertex mean? 2nd parameter
-            pass.draw_indexed(0..num_indices as _, 0, 0..1);
-        }
+        //     pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
+        //     pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
+        //     // jmi2k: What does base_vertex mean? 2nd parameter
+        //     pass.draw_indexed(0..num_indices as _, 0, 0..1);
+        // }
     }
 
     fn render_reach(&mut self, encoder: &mut CommandEncoder, pov: &Pov, location: IVec3, direction: Direction) {
@@ -665,12 +843,12 @@ impl Renderer {
         ctx.queue.submit(iter::once(encoder.finish()));
         output.present();
 
-        self.loaded_meshes.retain(|location, _| {
-            let location = chunk::merge_loc(*location, IVec3::ZERO);
-            let max_distance = (max_distance * 32) as f32;
-            let distance = location.as_vec3().distance(pov.position);
-            distance <= max_distance
-        });
+        // self.loaded_meshes.retain(|location, _| {
+        //     let location = chunk::merge_loc(*location, IVec3::ZERO);
+        //     let max_distance = (max_distance * 32) as f32;
+        //     let distance = location.as_vec3().distance(pov.position);
+        //     distance <= max_distance
+        // });
     }
 }
 

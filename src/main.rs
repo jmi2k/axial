@@ -243,7 +243,7 @@ async fn main() {
             }
 
             // jmi2k: moar crap
-            pov.position += aim * if sprint { 4e-1 } else { 2e-1 };
+            pov.position += aim * if sprint { 4e-0 } else { 2e-1 };
             // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
             world.tick();
 
@@ -319,7 +319,7 @@ async fn main() {
         }
 
         // Interpolate POV
-        let target = pov.position + aim * if sprint { 4e-1 } else { 2e-1 };
+        let target = pov.position + aim * if sprint { 4e-0 } else { 2e-1 };
         let ratio = accrued_time.as_secs_f32() / TICK_DURATION.as_secs_f32();
         let pov = pov.lerp(target, ratio);
 

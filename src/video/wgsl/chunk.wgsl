@@ -62,6 +62,9 @@ var<push_constant> p: Push;
 
 @vertex
 fn vert_main(
+    @builtin(instance_index)
+    instance_index: u32,
+
     @location(0)
     offset: u32,
 
@@ -93,8 +96,11 @@ fn vert_main(
         x -= num_copies;
     }
 
+    let cx = extractBits(instance_index, 0u, 8u);
+    let cy = extractBits(instance_index, 8u, 8u);
+    let cz = extractBits(instance_index, 16u, 8u);
     // jmi2k: suspicious of precision problems
-    let position = vec3f(va.x, va.y, va.z) + block_loc + vec3f(p.location);
+    let position = vec3f(32u * vec3u(cx, cy, cz)) + vec3f(va.x, va.y, va.z) + block_loc + vec3f(p.location);
     let shade = max(0., dot(vec3f(abs(va.nx), abs(va.ny), va.nz), vec3f(0.5, 0.3, -0.6)));
     // jmi2k: this doesn't work always apparently
     let mapping = vec2f(va.u + f32(num_copies), va.v);

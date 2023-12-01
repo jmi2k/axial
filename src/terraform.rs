@@ -99,7 +99,7 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
 
             let terrain_sample = 0.5 + terrain_noises.into_iter().sum::<f64>();
 
-            if terrain_sample * z as f64 > 8. || cave_sample > 0.5 {
+            if terrain_sample * z as f64 > 32. || cave_sample > 0.5 {
                 let block = match z {
                     16.. => air,
                     15 => water_surface,
@@ -112,13 +112,13 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
             }
 
             let block = match (z, accumulator) {
-                (16.., 0) => /*wheat*/air,
-                (15.., 1) => grass,
-                (14.., 2..=4) => dirt,
+                (48.., 0) => /*wheat*/air,
+                (47.., 1) => grass,
+                (46.., 2..=4) => dirt,
 
-                (15, 0) => sand,
-                (..=14, 0) => water,
-                (..=14, 1..=4) => dirt,
+                (47, 0) => sand,
+                (..=46, 0) => water,
+                (..=46, 1..=4) => dirt,
 
                 _ => stone,
             };
