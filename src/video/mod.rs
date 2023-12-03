@@ -28,15 +28,15 @@ impl<'win> Gfx<'win> {
 
         let adapter = instance.request_adapter(&options).await.unwrap();
 
-        let limits = Limits {
+        let required_limits = Limits {
             max_push_constant_size: 128,
             ..Limits::default()
         };
 
         let descriptor = DeviceDescriptor {
             label: None,
-            features: Features::PUSH_CONSTANTS | Features::POLYGON_MODE_LINE | Features::MULTI_DRAW_INDIRECT | Features::INDIRECT_FIRST_INSTANCE,
-            limits,
+            required_features: Features::PUSH_CONSTANTS | Features::POLYGON_MODE_LINE | Features::MULTI_DRAW_INDIRECT | Features::INDIRECT_FIRST_INSTANCE,
+            required_limits,
         };
 
         let (device, queue) = adapter.request_device(&descriptor, None).await.unwrap();
