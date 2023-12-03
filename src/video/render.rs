@@ -131,6 +131,17 @@ impl Region {
     }
 
     fn len(&self) -> u32 {
+        let last_mesh = unsafe {
+            self.meshes
+                .get_unchecked(REGION_LEN as usize - 1)
+                .get_unchecked(REGION_LEN as usize - 1)
+                .get_unchecked(REGION_LEN as usize - 1)
+        };
+
+        last_mesh.end()
+    }
+
+    fn capacity(&self) -> u32 {
         (self.vertex_buf.size() / mem::size_of::<QuadRef>() as u64) as u32
     }
 
@@ -190,49 +201,82 @@ impl Region {
         }
     }
 
-    fn load(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef]) {
+    fn load(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], transient_buf: &mut Buffer) {
         const Q: u64 = mem::size_of::<QuadRef>() as u64;
 
         let location = mask_chunk_loc(location);
         let old_mesh = self.mesh(location);
         let Δlen = quads.len() as u32 - old_mesh.len();
-
-        let start = location.z * REGION_LEN * REGION_LEN + location.y * REGION_LEN + location.x;
-        // println!("region={:p}\tstart={}\t\tself.len()={}\t\told_mesh.len()={}\told_mesh.end()={}\tquads.len()={}\tΔlen={}", self, start, self.len(), old_mesh.len(), old_mesh.end(), quads.len(), Δlen);
+        let old_mesh_end = old_mesh.end();
+        let old_mesh_offset = old_mesh.offset;
+        let num_quads_left = old_mesh.offset;
+        let num_quads_right = self.len() - old_mesh.end();
 
         // Ignore no-ops on empty meshes
         if quads.is_empty() && Δlen == 0 {
             return;
         }
 
-        let new_vertex_buf = alloc_vertex_buf(ctx, self.len() + Δlen);
         let mut encoder = ctx.device.create_command_encoder(&CommandEncoderDescriptor::default());
 
-        // Copy left remaining of buffer
-        // println!("First copy");
-        encoder.copy_buffer_to_buffer(
-            &self.vertex_buf,
-            0,
-            &new_vertex_buf,
-            0,
-            old_mesh.offset as u64 * Q);
+        if self.len() + Δlen > self.capacity() {
+            // allocate new buffer and move there
+            let new_vertex_buf = alloc_vertex_buf(ctx, self.len() + Δlen);
 
-        // Copy right remaining of buffer
-        // println!("Second copy");
-        encoder.copy_buffer_to_buffer(
-            &self.vertex_buf,
-            old_mesh.end() as u64 * Q,
-            &new_vertex_buf,
-            (old_mesh.end() + Δlen) as u64 * Q,
-            (self.len() - old_mesh.end()) as u64 * Q);
+            // Copy left remaining of buffer
+            encoder.copy_buffer_to_buffer(
+                &self.vertex_buf,
+                0,
+                &new_vertex_buf,
+                0,
+                num_quads_left as u64 * Q);
 
-        let commands = encoder.finish();
-        ctx.queue.submit(iter::once(commands));
+            // Copy right remaining of buffer
+            encoder.copy_buffer_to_buffer(
+                &self.vertex_buf,
+                old_mesh_end as u64 * Q,
+                &new_vertex_buf,
+                (old_mesh_end + Δlen) as u64 * Q,
+                num_quads_right as u64 * Q);
+
+            let commands = encoder.finish();
+            ctx.queue.submit(iter::once(commands));
+
+            // Replace region vertex buffer
+            self.vertex_buf = new_vertex_buf;
+        } else {
+            // reuse current buffer and use the transient buffer
+            let transient_len = transient_buf.size() as u32 / Q as u32;
+
+            if num_quads_right > transient_len {
+                println!("Reallocating transient buffer for {} quads", num_quads_right);
+                *transient_buf = alloc_vertex_buf(ctx, num_quads_right.next_power_of_two());
+            }
+
+            // Copy right remaining to transient
+            encoder.copy_buffer_to_buffer(
+                &self.vertex_buf,
+                old_mesh_end as u64 * Q,
+                &transient_buf,
+                0,
+                num_quads_right as u64 * Q);
+
+            // ...and back to the current buffer
+            encoder.copy_buffer_to_buffer(
+                &transient_buf,
+                0,
+                &self.vertex_buf,
+                (old_mesh_end + Δlen) as u64 * Q,
+                num_quads_right as u64 * Q);
+
+            let commands = encoder.finish();
+            ctx.queue.submit(iter::once(commands));
+        }
 
         // Write quads to mesh gap
         ctx.queue.write_buffer(
-            &new_vertex_buf,
-            old_mesh.offset as u64 * Q,
+            &self.vertex_buf,
+            old_mesh_offset as u64 * Q,
             bytemuck::cast_slice(quads));
 
         // Adjust mesh reference
@@ -248,18 +292,7 @@ impl Region {
             mesh.offset += Δlen;
         }
 
-        // print!("+++ ");
-
-        for mesh in flattened_meshes {
-            // print!("{} ", mesh.offset);
-        }
-
-        // println!();
-
         self.write_indirects(ctx);
-
-        // Replace region vertex buffer
-        self.vertex_buf = new_vertex_buf;
     }
 }
 
@@ -333,7 +366,8 @@ pub struct Renderer {
     reach_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
     loaded_regions: HashMap<IVec3, Region, ahash::RandomState>,
-    index_buffer: Buffer,
+    index_buf: Buffer,
+    transient_buf: Buffer,
 }
 
 impl Renderer {
@@ -590,7 +624,7 @@ impl Renderer {
         };
 
         let (depth, frame) = build_frames(ctx);
-        let index_buffer = build_indices(ctx, 131_072);
+        let index_buf = build_indices(ctx, 131_072);
         let sampler = ctx.device.create_sampler(&sampler_descriptor);
         let pack_group = build_pack_group(ctx, &pack_layout, pack, &sampler);
         let frame_group = build_frame_group(ctx, &frame_layout, &frame);
@@ -611,7 +645,8 @@ impl Renderer {
             reach_pipeline,
             post_pipeline,
             loaded_regions: HashMap::default(),
-            index_buffer,
+            transient_buf: alloc_vertex_buf(ctx, 1_024),
+            index_buf,
         }
     }
 
@@ -628,13 +663,13 @@ impl Renderer {
     pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], alpha_quads: &[QuadRef]) {
         let (region_loc, chunk_loc) = split_loc(location);
         let region = self.loaded_regions.entry(region_loc).or_insert_with(|| Region::new(ctx));
-        region.load(ctx, chunk_loc, nonces, quads);
+        region.load(ctx, chunk_loc, nonces, quads, &mut self.transient_buf);
 
-        let current_num_quads = self.index_buffer.size() as usize / 4 / 6;
+        let current_num_quads = self.index_buf.size() as usize / 4 / 6;
         let max_num_quads = region.len() as _;
 
         if current_num_quads < max_num_quads {
-            self.index_buffer = build_indices(ctx, max_num_quads.next_power_of_two());
+            self.index_buf = build_indices(ctx, max_num_quads.next_power_of_two());
         }
     }
 
@@ -705,7 +740,7 @@ impl Renderer {
         pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 76, &time.to_ne_bytes());
-        pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint32);
+        pass.set_index_buffer(self.index_buf.slice(..), IndexFormat::Uint32);
 
         'render:
         for (location, mesh) in &self.loaded_regions {
