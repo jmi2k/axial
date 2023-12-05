@@ -4,7 +4,7 @@ use glam::{IVec3, Mat4, Vec4, Vec3};
 use image::RgbaImage;
 use wgpu::{
     include_wgsl,
-    util::{BufferInitDescriptor, DeviceExt, DrawIndexedIndirectArgs},
+    util::{BufferInitDescriptor, DeviceExt, DrawIndexedIndirectArgs, DrawIndirectArgs},
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
     Buffer, BufferBinding, BufferBindingType, BufferUsages, Color, ColorTargetState, ColorWrites,
@@ -23,23 +23,23 @@ use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::Worl
 
 use super::Gfx;
 
-const REGION_LEN: i32 = 2;
+const REGION_LEN: i32 = 4;
 const FOV: f32 = 90. * PI / 180.;
 const ZNEAR: f32 = 1e-2;
 const ZFAR: f32 = 1e4;
 
-const VERTEX_LAYOUT: VertexBufferLayout<'static> = {
-    let attributes = &vertex_attr_array! {
-        0 => Uint32,
-        1 => Uint32,
-    };
-
-    VertexBufferLayout {
-        array_stride: mem::size_of::<VertexRef>() as _,
-        step_mode: VertexStepMode::Vertex,
-        attributes,
-    }
-};
+const REGION_SLOTS: &[BindGroupLayoutEntry; 1] = &[
+    BindGroupLayoutEntry {
+        binding: 0,
+        count: None,
+        visibility: ShaderStages::VERTEX,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+    },
+];
 
 const PACK_SLOTS: &[BindGroupLayoutEntry; 4] = &[
     BindGroupLayoutEntry {
@@ -93,8 +93,7 @@ const FRAME_SLOTS: &[BindGroupLayoutEntry; 1] = &[BindGroupLayoutEntry {
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 
-pub type VertexRef = u64;
-pub type QuadRef = [VertexRef; 4];
+pub type QuadRef = u64;
 
 #[derive(Default)]
 struct MeshRef {
@@ -117,15 +116,20 @@ struct Region {
     meshes: Cube<MeshRef, {REGION_LEN as usize}>,
     vertex_buf: Buffer,
     indirect_buf: Buffer,
+    bind_group: BindGroup,
     num_indirects: u32,
 }
 
 impl Region {
-    fn new(ctx: &Gfx) -> Self {
+    fn new(ctx: &Gfx, layout: &BindGroupLayout) -> Self {
+        let vertex_buf = alloc_vertex_buf(ctx, 16);
+        let bind_group = build_region_group(ctx, layout, &vertex_buf);
+
         Self {
             meshes: Cube::default(),
-            vertex_buf: alloc_vertex_buf(ctx, 0),
+            vertex_buf,
             indirect_buf: alloc_indirect_buf(ctx),
+            bind_group,
             num_indirects: 0,
         }
     }
@@ -186,22 +190,21 @@ impl Region {
                 0,
             ]);
 
-            let indirect = DrawIndexedIndirectArgs {
-                index_count: 6 * mesh.num_quads,
+            let indirect = DrawIndirectArgs {
+                vertex_count: 6 * mesh.num_quads,
                 instance_count: 1,
-                first_index: 0,
-                base_vertex: 4 * mesh.offset as i32,
+                first_vertex: 6 * mesh.offset,
                 first_instance: instance,
             };
 
-            ctx.queue.write_buffer(&self.indirect_buf, (self.num_indirects as usize * mem::size_of::<DrawIndexedIndirectArgs>()) as u64, indirect.as_bytes());
+            ctx.queue.write_buffer(&self.indirect_buf, (self.num_indirects as usize * mem::size_of::<DrawIndirectArgs>()) as u64, indirect.as_bytes());
             self.num_indirects += 1;
         }
         }
         }
     }
 
-    fn load(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], transient_buf: &mut Buffer) {
+    fn load(&mut self, ctx: &Gfx, layout: &BindGroupLayout, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], transient_buf: &mut Buffer) {
         const Q: u64 = mem::size_of::<QuadRef>() as u64;
 
         let location = mask_chunk_loc(location);
@@ -243,6 +246,7 @@ impl Region {
             ctx.queue.submit(iter::once(commands));
 
             // Replace region vertex buffer
+            self.bind_group = build_region_group(ctx, layout, &new_vertex_buf);
             self.vertex_buf = new_vertex_buf;
         } else {
             // reuse current buffer and use the transient buffer
@@ -332,7 +336,7 @@ fn alloc_vertex_buf(ctx: &Gfx, num_quads: u32) -> Buffer {
     let descriptor = BufferDescriptor {
         label: None,
         size: num_quads as u64 * mem::size_of::<QuadRef>() as u64,
-        usage: BufferUsages::VERTEX | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
 
@@ -342,7 +346,7 @@ fn alloc_vertex_buf(ctx: &Gfx, num_quads: u32) -> Buffer {
 fn alloc_indirect_buf(ctx: &Gfx) -> Buffer {
     let descriptor = BufferDescriptor {
         label: None,
-        size: (REGION_LEN * REGION_LEN * REGION_LEN) as u64 * mem::size_of::<DrawIndexedIndirectArgs>() as u64,
+        size: (REGION_LEN * REGION_LEN * REGION_LEN) as u64 * mem::size_of::<DrawIndirectArgs>() as u64,
         usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
@@ -356,6 +360,7 @@ pub struct Renderer {
     depth: Texture,
     frame: Texture,
     sampler: Sampler,
+    region_layout: BindGroupLayout,
     pack_layout: BindGroupLayout,
     pack_group: BindGroup,
     frame_layout: BindGroupLayout,
@@ -366,12 +371,16 @@ pub struct Renderer {
     reach_pipeline: RenderPipeline,
     post_pipeline: RenderPipeline,
     loaded_regions: HashMap<IVec3, Region, ahash::RandomState>,
-    index_buf: Buffer,
     transient_buf: Buffer,
 }
 
 impl Renderer {
     pub fn new(ctx: &Gfx, pack: &Pack) -> Self {
+        let region_descriptor = BindGroupLayoutDescriptor {
+            label: None,
+            entries: REGION_SLOTS,
+        };
+
         let pack_descriptor = BindGroupLayoutDescriptor {
             label: None,
             entries: PACK_SLOTS,
@@ -382,6 +391,7 @@ impl Renderer {
             entries: FRAME_SLOTS,
         };
 
+        let region_layout = ctx.device.create_bind_group_layout(&region_descriptor);
         let pack_layout = ctx.device.create_bind_group_layout(&pack_descriptor);
         let frame_layout = ctx.device.create_bind_group_layout(&frame_descriptor);
 
@@ -398,7 +408,7 @@ impl Renderer {
 
             let layout_desc = PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&pack_layout],
+                bind_group_layouts: &[&pack_layout, &region_layout],
                 push_constant_ranges,
             };
 
@@ -423,7 +433,7 @@ impl Renderer {
             let vertex = VertexState {
                 module: &shader,
                 entry_point: "vert_main",
-                buffers: &[VERTEX_LAYOUT],
+                buffers: &[],
             };
 
             let solid_target = ColorTargetState {
@@ -624,7 +634,6 @@ impl Renderer {
         };
 
         let (depth, frame) = build_frames(ctx);
-        let index_buf = build_indices(ctx, 131_072);
         let sampler = ctx.device.create_sampler(&sampler_descriptor);
         let pack_group = build_pack_group(ctx, &pack_layout, pack, &sampler);
         let frame_group = build_frame_group(ctx, &frame_layout, &frame);
@@ -635,6 +644,7 @@ impl Renderer {
             depth,
             frame,
             sampler,
+            region_layout,
             pack_layout,
             pack_group,
             frame_layout,
@@ -646,7 +656,6 @@ impl Renderer {
             post_pipeline,
             loaded_regions: HashMap::default(),
             transient_buf: alloc_vertex_buf(ctx, 1_024),
-            index_buf,
         }
     }
 
@@ -662,15 +671,8 @@ impl Renderer {
     // jmi2k: accept a closure instead?
     pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], alpha_quads: &[QuadRef]) {
         let (region_loc, chunk_loc) = split_loc(location);
-        let region = self.loaded_regions.entry(region_loc).or_insert_with(|| Region::new(ctx));
-        region.load(ctx, chunk_loc, nonces, quads, &mut self.transient_buf);
-
-        let current_num_quads = self.index_buf.size() as usize / 4 / 6;
-        let max_num_quads = region.len() as _;
-
-        if current_num_quads < max_num_quads {
-            self.index_buf = build_indices(ctx, max_num_quads.next_power_of_two());
-        }
+        let region = self.loaded_regions.entry(region_loc).or_insert_with(|| Region::new(ctx, &self.region_layout));
+        region.load(ctx, &self.region_layout, chunk_loc, nonces, quads, &mut self.transient_buf);
     }
 
     pub fn unload_mesh(&mut self, location: IVec3) {
@@ -740,11 +742,10 @@ impl Renderer {
         pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 76, &time.to_ne_bytes());
-        pass.set_index_buffer(self.index_buf.slice(..), IndexFormat::Uint32);
 
         'render:
         for (location, mesh) in &self.loaded_regions {
-            let Region { vertex_buf, .. } = mesh;
+            let Region { vertex_buf, bind_group, .. } = mesh;
             let location = merge_loc(chunk::merge_loc(*location, IVec3::ZERO), IVec3::ZERO);
 
             if vertex_buf.size() == 0 {
@@ -759,35 +760,11 @@ impl Renderer {
             }
 
             pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
-            pass.set_vertex_buffer(0, vertex_buf.slice(..));
-            pass.multi_draw_indexed_indirect(&mesh.indirect_buf, 0, mesh.num_indirects);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.multi_draw_indirect(&mesh.indirect_buf, 0, mesh.num_indirects);
         }
 
         pass.set_pipeline(alpha_pipeline);
-
-        // 'render:
-        // for (location, mesh) in &self.loaded_meshes {
-        //     let GpuMesh { alpha_vertex_buf, .. } = mesh;
-        //     let num_vertices = alpha_vertex_buf.size() / VERTEX_LAYOUT.array_stride;
-        //     let num_indices = num_vertices / 4 * 6;
-        //     let location = chunk::merge_loc(*location, IVec3::ZERO);
-
-        //     if num_vertices == 0 {
-        //         continue;
-        //     }
-
-        //     let center = (location + 16).as_vec3();
-
-        //     for plane in planes {
-        //         let spherical_distance = center.dot(plane.truncate()) + plane.w;
-        //         if spherical_distance < -radius { continue 'render; }
-        //     }
-
-        //     pass.set_push_constants(ShaderStages::VERTEX, 64, bytemuck::bytes_of(&location));
-        //     pass.set_vertex_buffer(0, alpha_vertex_buf.slice(..));
-        //     // jmi2k: What does base_vertex mean? 2nd parameter
-        //     pass.draw_indexed(0..num_indices as _, 0, 0..1);
-        // }
     }
 
     fn render_reach(&mut self, encoder: &mut CommandEncoder, pov: &Pov, location: IVec3, direction: Direction) {
@@ -887,24 +864,7 @@ impl Renderer {
     }
 }
 
-pub fn quad_ref(base: usize, location: IVec3, translucent: bool, sky_exposure: u8) -> QuadRef {
-    let offsets = [0, 1, 2, 3/* , 2, 1 */];
-    array::from_fn(|idx| vertex_ref(4 * base + offsets[idx], location, translucent, sky_exposure))
-}
-
-pub fn extend_quad_ref(quad_ref: &mut QuadRef, increment: IVec3) {
-    for (idx, vertex_ref) in quad_ref.iter_mut().enumerate() {
-        if idx & 1 == 1 {
-            *vertex_ref += 1 << 52;
-            *vertex_ref +=
-                (increment.x as u64) << 32
-                | (increment.y as u64) << 37
-                | (increment.z as u64) << 42;
-        }
-    }
-}
-
-fn vertex_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure: u8) -> VertexRef {
+pub fn quad_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure: u8) -> QuadRef {
     debug_assert!(sky_exposure < 16, "sky exposure out of bounds");
 
     let location = chunk::mask_block_loc(location);
@@ -918,21 +878,8 @@ fn vertex_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure: u
         | (sky_exposure as u64) << 48
 }
 
-fn build_indices(ctx: &Gfx, num_quads: usize) -> Buffer {
-    // jmi2k: try to make the indices 16-bit when switching to a suballocator
-    println!("rebuilding index buffer with {} quads", num_quads);
-
-    let indices = (0..num_quads)
-        .flat_map(|n| [0u32, 1, 2, 3, 2, 1].map(|idx| 4 * n as u32 + idx))
-        .collect::<Vec<_>>();
-
-    let descriptor = BufferInitDescriptor {
-        label: None,
-        contents: bytemuck::cast_slice(&indices),
-        usage: BufferUsages::INDEX,
-    };
-
-    ctx.device.create_buffer_init(&descriptor)
+pub fn extend_quad_ref(quad_ref: &mut QuadRef, increment: IVec3) {
+    *quad_ref += 1 << 52;
 }
 
 fn build_frames(ctx: &Gfx) -> (Texture, Texture) {
@@ -1080,6 +1027,31 @@ fn build_mask_texture(ctx: &Gfx, masks: &[RgbaImage]) -> Texture {
     }
 
     atlas
+}
+
+fn build_region_group(
+    ctx: &Gfx,
+    layout: &BindGroupLayout,
+    vertex_buf: &Buffer,
+) -> BindGroup {
+    let quad_ref_binding = BufferBinding {
+        buffer: &vertex_buf,
+        offset: 0,
+        size: None,
+    };
+
+    #[rustfmt::skip]
+    let entries = &[
+        BindGroupEntry { binding: 0, resource: BindingResource::Buffer(quad_ref_binding) },
+    ];
+
+    let descriptor = BindGroupDescriptor {
+        label: None,
+        layout,
+        entries,
+    };
+
+    ctx.device.create_bind_group(&descriptor)
 }
 
 fn build_pack_group(

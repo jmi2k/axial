@@ -46,6 +46,11 @@ struct Vertex {
     tint_mask: i32,
 };
 
+struct QuadRef {
+    offset: u32,
+    blob: u32,
+};
+
 @group(0) @binding(0)
 var<storage> vertex_atlas: array<Vertex>;
 
@@ -58,6 +63,9 @@ var masks: texture_2d_array<f32>;
 @group(0) @binding(3)
 var sanpler: sampler;
 
+@group(1) @binding(0)
+var<storage> quad_buf: array<QuadRef>;
+
 var<push_constant> p: Push;
 
 @vertex
@@ -65,35 +73,48 @@ fn vert_main(
     @builtin(instance_index)
     instance_index: u32,
 
-    @location(0)
-    offset: u32,
-
-    @location(1)
-    blob: u32,
+    @builtin(vertex_index)
+    vertex_index: u32,
 ) -> V2F {
-    let va = vertex_atlas[offset];
+    let qr = quad_buf[vertex_index / 6u];
 
-    var x = extractBits(blob, 0u, 5u);
-    var y = extractBits(blob, 5u, 5u);
-    var z = extractBits(blob, 10u, 5u);
-    let translucent = extractBits(blob, 15u, 1u);
-    let sky_exposure = extractBits(blob, 16u, 4u);
-    let num_copies = extractBits(blob, 20u, 5u);
-    let block_loc = vec3f(vec3u(x, y, z));
+    var index = vertex_index % 6u;
+
+    if index == 4u {
+        index = 2u;
+    } else if index == 5u {
+        index = 1u;
+    }
+
+    let va = vertex_atlas[4u * qr.offset + index];
+
+    var x = extractBits(qr.blob, 0u, 5u);
+    var y = extractBits(qr.blob, 5u, 5u);
+    var z = extractBits(qr.blob, 10u, 5u);
+    let translucent = extractBits(qr.blob, 15u, 1u);
+    let sky_exposure = extractBits(qr.blob, 16u, 4u);
+    let num_copies = extractBits(qr.blob, 20u, 5u);
+    var block_loc = vec3f(vec3u(x, y, z));
+
+    var mapping = vec2f(va.u, va.v);
 
     // jmi2k: HACK!!!!
-    if va.nx == -1. {
-        z -= num_copies;
-    } else if va.nx == 1. {
-        y -= num_copies;
-    } else if va.ny == -1. {
-        x -= num_copies;
-    } else if va.ny == 1. {
-        z -= num_copies;
-    } else if va.nz == -1. {
-        y -= num_copies;
-    } else if va.nz == 1. {
-        x -= num_copies;
+    if index == 1u || index == 3u || index == 5u {
+        if va.nx == -1. {
+            block_loc.z += f32(num_copies);
+        } else if va.nx == 1. {
+            block_loc.y += f32(num_copies);
+        } else if va.ny == -1. {
+            block_loc.x += f32(num_copies);
+        } else if va.ny == 1. {
+            block_loc.z += f32(num_copies);
+        } else if va.nz == -1. {
+            block_loc.y += f32(num_copies);
+        } else if va.nz == 1. {
+            block_loc.x += f32(num_copies);
+        }
+
+        mapping.x += f32(num_copies);
     }
 
     let cx = extractBits(instance_index, 0u, 8u);
@@ -102,8 +123,6 @@ fn vert_main(
     // jmi2k: suspicious of precision problems
     let position = vec3f(32u * vec3u(cx, cy, cz)) + vec3f(va.x, va.y, va.z) + block_loc + vec3f(p.location);
     let shade = max(0., dot(vec3f(abs(va.nx), abs(va.ny), va.nz), vec3f(0.5, 0.3, -0.6)));
-    // jmi2k: this doesn't work always apparently
-    let mapping = vec2f(va.u + f32(num_copies), va.v);
 
     return V2F(
         p.xform * vec4f(position, 1.),
