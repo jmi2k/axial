@@ -208,12 +208,17 @@ impl Region {
         const Q: u64 = mem::size_of::<QuadRef>() as u64;
 
         let location = mask_chunk_loc(location);
-        let old_mesh = self.mesh(location);
-        let Δlen = quads.len() as u32 - old_mesh.len();
-        let old_mesh_end = old_mesh.end();
-        let old_mesh_offset = old_mesh.offset;
-        let num_quads_left = old_mesh.offset;
-        let num_quads_right = self.len() - old_mesh.end();
+        let old_len = self.len();
+        let mesh = self.mesh_mut(location);
+        let Δlen = quads.len() as u32 - mesh.len();
+        let old_mesh_end = mesh.end();
+        let old_mesh_offset = mesh.offset;
+        let num_quads_left = mesh.offset;
+        let num_quads_right = old_len - mesh.end();
+
+        // Adjust mesh reference
+        mesh.num_quads = quads.len() as _;
+        mesh.nonces = nonces.clone();
 
         // Ignore no-ops on empty meshes
         if quads.is_empty() && Δlen == 0 {
@@ -253,7 +258,6 @@ impl Region {
             let transient_len = transient_buf.size() as u32 / Q as u32;
 
             if num_quads_right > transient_len {
-                println!("Reallocating transient buffer for {} quads", num_quads_right);
                 *transient_buf = alloc_vertex_buf(ctx, num_quads_right.next_power_of_two());
             }
 
@@ -282,11 +286,6 @@ impl Region {
             &self.vertex_buf,
             old_mesh_offset as u64 * Q,
             bytemuck::cast_slice(quads));
-
-        // Adjust mesh reference
-        let old_mesh = self.mesh_mut(location);
-        old_mesh.num_quads = quads.len() as _;
-        old_mesh.nonces = nonces.clone();
 
         let flattened_meshes = self.meshes.flatten_mut().flatten_mut();
         let start = location.z * REGION_LEN * REGION_LEN + location.y * REGION_LEN + location.x + 1;
