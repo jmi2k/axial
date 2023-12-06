@@ -151,14 +151,13 @@ fn vert_main(
 @fragment
 fn frag_main(v: V2F) -> @location(0) vec4f {
     let tile = u32(abs(v.tile)) - 1u;
-    let randomize = v.tile < 0;
     let mapping = fract(v.mapping);
     let copy_idx = u32(abs(floor(v.mapping.x)));
+    let randomize = v.tile < 0;
     var x = v.location.x;
     var y = v.location.y;
     var z = v.location.z;
 
-    // jmi2k: HACK!!!!
     if v.normal.x == -1 {
         z += copy_idx;
     } else if v.normal.x == 1 {
@@ -173,53 +172,54 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
         x += copy_idx;
     }
 
-    let random = u32(fract(sin(dot(vec2f(vec2u(x, y)), vec2f(12.9898, 78.233))) * 43758.5453) * 4.) % 8u;
-    var randomized_mapping = mapping;
+    let random = u32(randomize) * u32(fract(sin(dot(vec2f(vec2u(x, y)), vec2f(12.9898, 78.233))) * 43758.5453) * 4.) % 4u;
+    let angle = f32(random % 4u) * asin(1.);
 
-    if randomize {
-        if random == 1u {
-            randomized_mapping *= vec2f(-1., 1.);
-            randomized_mapping -= vec2f(-1., 0.);
-        } else if random == 2u {
-            randomized_mapping *= vec2f(1., -1.);
-            randomized_mapping -= vec2f(0., -1.);
-        } else if random == 3u {
-            randomized_mapping *= vec2f(-1., -1.);
-            randomized_mapping -= vec2f(-1., -1.);
-        } else if random == 4u {
-            randomized_mapping = vec2f(randomized_mapping.y, randomized_mapping.x);
-            randomized_mapping *= vec2f(-1., 1.);
-            randomized_mapping -= vec2f(-1., 0.);
-        } else if random == 5u {
-            randomized_mapping = vec2f(randomized_mapping.y, randomized_mapping.x);
-            randomized_mapping *= vec2f(1., -1.);
-            randomized_mapping -= vec2f(0., -1.);
-        } else if random == 6u {
-            randomized_mapping = vec2f(randomized_mapping.y, randomized_mapping.x);
-            randomized_mapping *= vec2f(-1., -1.);
-            randomized_mapping -= vec2f(-1., -1.);
-        } else if random == 7u {
-            randomized_mapping = vec2f(randomized_mapping.y, randomized_mapping.x);
-            randomized_mapping *= vec2f(1., -1.);
-            randomized_mapping -= vec2f(0., -1.);
-        }
-    }
+    // Random rotation matrix
+    let rotation = mat2x2(
+        cos(angle), -sin(angle),
+        sin(angle), cos(angle),
+    );
 
-    //let randomized_mappinggg = v.mapping;
-    //var sample = textureSample(tiles, sanpler, randomized_mapping, tile);
-    // jmi2k: we gain texture randomization, but we lost mipmapping.
-    //var color_sample = textureLoad(tiles, vec2i(16.0 * randomized_mapping) % 16, tile, 0);
-    var color_sample = textureSampleGrad(tiles, sanpler, randomized_mapping, tile, dpdx(v.mapping), dpdy(v.mapping));
-    var mask_sample = textureLoad(masks, vec2i(16.0 * randomized_mapping) % 16, v.tint_mask, 0);
+    // Apply random rotation to mapping
+    let mapping_0 = mapping - 0.5;
+    let rotated_mapping_0 = rotation * mapping_0;
+    let rotated_mapping = rotated_mapping_0 + 0.5;
 
-    if !bool(p.translucent) {
-        color_sample.a = select(0., 1., color_sample.a >= 0.5);
-        if color_sample.a == 0. { discard; }
-    }
+    // Sample texture with unchopped UV derivatives to avoid artifacts
+    var color_sample = textureSampleGrad(
+        tiles,
+        sanpler,
+        rotated_mapping,
+        tile,
+        dpdx(v.mapping),
+        dpdy(v.mapping),
+    );
 
-    if mask_sample.r == 1. {
-        color_sample *= vec4f(0.529, 0.741, 0.341, 1.);
-    }
+    // Threshold alpha if the block is not translucent
+    color_sample.a = select(
+        round(color_sample.a),
+        color_sample.a,
+        bool(p.translucent),
+    );
+
+    // Discard invisible pixels
+    if color_sample.a == 0. { discard; }
+
+    // Load value from mask to apply tint
+    var mask_sample = textureLoad(
+        masks,
+        vec2i(16.0 * rotated_mapping) % 16,
+        v.tint_mask,
+        0,
+    );
+
+    // Apply tint based on the R channel — G and B are currently unused!
+    color_sample *= mix(
+        vec4f(1.),
+        vec4f(0.529, 0.741, 0.341, 1.),
+        mask_sample.r,
+    );
 
     let shaded = color_sample - vec4f(color_sample.xyz * v.shade, 0.);
     let lit = shaded * vec4(vec3(v.sky_light), 1.);
