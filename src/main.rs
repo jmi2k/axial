@@ -42,7 +42,8 @@ use winit::{
 };
 use world::World;
 
-const MAX_DISTANCE: usize = 12;
+const MAX_RENDER_DISTANCE: usize = 12;
+const MAX_TICK_DISTANCE: usize = 4;
 const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
 
@@ -220,10 +221,10 @@ async fn main() {
             generating.remove(&location);
         }
 
-        let max_distance = MAX_DISTANCE as i32;
-
         // jmi2k: this takes too long
         while accrued_time >= TICK_DURATION {
+            let max_distance = MAX_RENDER_DISTANCE as i32;
+
             #[rustfmt::skip]
             for k in z - max_distance .. z + max_distance {
             for j in y - max_distance .. y + max_distance {
@@ -232,7 +233,7 @@ async fn main() {
 
                 let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
                 let distance = pov.position.distance(fine_loc.as_vec3());
-                let max_distance = MAX_DISTANCE as f32 * 32.;
+                let max_distance = MAX_RENDER_DISTANCE as f32 * 32.;
 
                 // jmi2k: this eats ~10ms at MAX_DISTANCE = 24, maybe optimize conditions? caching?
                 if distance <= max_distance && world.chunk_mut(chunk_loc).is_none() && !generating.contains(&chunk_loc) {
@@ -246,7 +247,7 @@ async fn main() {
             // jmi2k: moar crap
             pov.position += aim * if sprint { 4e-0 } else { 2e-1 };
             // jmi2k: this is prohibitively expensive at MAX_DISTANCE = 24
-            world.tick();
+            world.tick(pov.position);
 
             if let Some((location, direction)) = reached_face {
                 //let mut world = world::<1>::new(&mut world);
@@ -272,9 +273,10 @@ async fn main() {
         let then = Instant::now();
         let mut num_checked = 0;
 
-        while num_checked < 8 * MAX_DISTANCE * MAX_DISTANCE * MAX_DISTANCE {
-            num_checked += 1;
+        while num_checked < 8 * MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE {
+            let max_distance = MAX_RENDER_DISTANCE as i32;
 
+            num_checked += 1;
             offset_3d.x += 1;
 
             if offset_3d.x >= 2 * max_distance {
@@ -294,7 +296,7 @@ async fn main() {
             let chunk_loc = IVec3 { x, y, z } - max_distance + offset_3d;
             let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
             let distance = pov.position.distance(fine_loc.as_vec3());
-            let max_distance = MAX_DISTANCE as f32 * 32.;
+            let max_distance = MAX_RENDER_DISTANCE as f32 * 32.;
 
             // Unload far away chunks
             if distance > max_distance {
@@ -338,7 +340,7 @@ async fn main() {
         let pov = pov.lerp(target, ratio);
 
         // Render next frame
-        renderer.render(&gfx, /*&world,*/ &pov, reached_face, MAX_DISTANCE, wireframe);
+        renderer.render(&gfx, /*&world,*/ &pov, reached_face, MAX_RENDER_DISTANCE, wireframe);
         redraw = false;
     });
 }

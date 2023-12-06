@@ -58,6 +58,7 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
     let grass = 1;
     let dirt = 2;
     let stone = 3;
+    let wheat_0 = 4;
     let wheat = 5;
     let water = 6;
     let water_surface = 7;
@@ -112,7 +113,7 @@ fn terraform(location: IVec3, perlins: &[Perlin]) -> (Chunk, Box<Layer<i32, 32>>
             }
 
             let block = match (z, accumulator) {
-                (48.., 0) => /*wheat*/air,
+                (48.., 0) => wheat_0,
                 (47.., 1) => grass,
                 (46.., 2..=4) => dirt,
 

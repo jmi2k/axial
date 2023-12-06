@@ -3,9 +3,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
-use crate::chunk::{self, Chunk};
+use crate::{chunk::{self, Chunk}, MAX_TICK_DISTANCE};
 
 pub struct World {
     next_tick: AtomicU64,
@@ -42,11 +42,15 @@ impl World {
         self.loaded_chunks.remove(&location);
     }
 
-    pub fn tick(&mut self) -> u64 {
+    pub fn tick(&mut self, position: Vec3) -> u64 {
         let tick = self.next_tick.fetch_add(1, Ordering::Relaxed);
 
-        for chunk in self.loaded_chunks.values_mut() {
-            chunk.tick(tick);
+        for (location, chunk) in &mut self.loaded_chunks {
+            let fine_loc = chunk::merge_loc(*location, IVec3::ZERO);
+
+            if fine_loc.as_vec3().distance(position) <= 32. * MAX_TICK_DISTANCE as f32 {
+                chunk.tick(tick);
+            }
         }
 
         tick
