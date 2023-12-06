@@ -25,7 +25,7 @@ use arrayvec::ArrayVec;
 use asset::Pack;
 use chunk::Chunk;
 use event::{Action, Handler, Input};
-use glam::{IVec3, Quat, Vec3, EulerRot};
+use glam::{IVec3, Quat, Vec3, EulerRot, IVec2};
 use mesh::Mesher;
 use pov::Pov;
 use terraform::Terraformer;
@@ -115,6 +115,7 @@ async fn main() {
     let mut selected_block = 1;
 
     let mut reached_face = None;
+    let mut offset_3d = IVec3::ZERO;
 
     let _ = event_loop.run(move |event, _| {
         // Process user input
@@ -269,13 +270,28 @@ async fn main() {
         }
 
         let then = Instant::now();
+        let mut num_checked = 0;
 
-        #[rustfmt::skip]
-        'mesh:
-        for k in (z - max_distance .. z + max_distance).rev() {
-        for j in y - max_distance .. y + max_distance {
-        for i in x - max_distance .. x + max_distance {
-            let chunk_loc = IVec3::new(i, j, k);
+        while num_checked < 8 * MAX_DISTANCE * MAX_DISTANCE * MAX_DISTANCE {
+            num_checked += 1;
+
+            offset_3d.x += 1;
+
+            if offset_3d.x >= 2 * max_distance {
+                offset_3d.x = 0;
+                offset_3d.y += 1;
+            }
+
+            if offset_3d.y >= 2 * max_distance {
+                offset_3d.y = 0;
+                offset_3d.z += 1;
+            }
+
+            if offset_3d.z >= 2 * max_distance {
+                offset_3d.z = 0;
+            }
+
+            let chunk_loc = IVec3 { x, y, z } - max_distance + offset_3d;
             let fine_loc = chunk::merge_loc(chunk_loc, IVec3::ZERO);
             let distance = pov.position.distance(fine_loc.as_vec3());
             let max_distance = MAX_DISTANCE as f32 * 32.;
@@ -311,11 +327,9 @@ async fn main() {
             let (mesh, alpha_mesh) = mesher.mesh(&pack, &neighbor_chunks);
             renderer.load_mesh(&gfx, chunk_loc, &neighbor_nonces, mesh, alpha_mesh);
 
-            if then.elapsed() > Duration::from_micros(1500) {
-                break 'mesh;
+            if then.elapsed() > Duration::from_micros(4500) {
+                break;
             }
-        }
-        }
         }
 
         // Interpolate POV
