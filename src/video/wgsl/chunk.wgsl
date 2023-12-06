@@ -66,6 +66,13 @@ var<storage> qrefs: array<QuadRef>;
 
 var<push_constant> p: Push;
 
+fn pcg(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+
+    return (word >> 22u) ^ word;
+}
+
 @vertex
 fn vert_main(
     @builtin(instance_index)
@@ -133,7 +140,6 @@ fn vert_main(
         mapping.x += f32(strip_len);
     }
 
-    // jmi2k: precision issues, push integer camera position
     position += vec3f(location);
 
     return V2F(
@@ -172,7 +178,7 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
         x += copy_idx;
     }
 
-    let random = u32(randomize) * u32(fract(sin(dot(vec2f(vec2u(x, y)), vec2f(12.9898, 78.233))) * 43758.5453) * 4.) % 4u;
+    let random = u32(randomize) * pcg(x ^ 2u * y ^ 3u * z);
     let angle = f32(random % 4u) * asin(1.);
 
     // Random rotation matrix
@@ -223,8 +229,7 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
 
     let shaded = color_sample - vec4f(color_sample.xyz * v.shade, 0.);
     let lit = shaded * vec4(vec3(v.sky_light), 1.);
-    let fogged = lit; // jmi2k: todo
-    return fogged;
+    return lit;
 }
 
 fn shade(normal: vec3f) -> f32 {
