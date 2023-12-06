@@ -403,7 +403,7 @@ impl Renderer {
             #[rustfmt::skip]
             let push_constant_ranges = &[
                 PushConstantRange { stages: ShaderStages::VERTEX, range: 0..80 },
-                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 76..80 },
+                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 76..84 },
             ];
 
             let layout_desc = PipelineLayoutDescriptor {
@@ -721,7 +721,8 @@ impl Renderer {
         let Extent3d { width, height, .. } = self.frame.size();
         let aspect = width as f32 / height as f32;
         let projection = Mat4::perspective_rh(FOV, aspect, ZNEAR, ZFAR);
-        let xform = projection * Mat4::from(pov);
+        let xform = projection * pov.xform();
+        let camera_loc = pov.location();
         let time = self.epoch.elapsed().as_secs_f32();
 
         let planes = [
@@ -742,17 +743,18 @@ impl Renderer {
         pass.set_bind_group(0, &self.pack_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX, 0, bytemuck::bytes_of(&xform));
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 76, &time.to_ne_bytes());
+        pass.set_push_constants(ShaderStages::FRAGMENT, 80, &0u32.to_ne_bytes());
 
         'render:
         for (location, mesh) in &self.loaded_regions {
             let Region { vertex_buf, bind_group, .. } = mesh;
-            let location = merge_loc(chunk::merge_loc(*location, IVec3::ZERO), IVec3::ZERO);
+            let location = camera_loc + merge_loc(chunk::merge_loc(*location, IVec3::ZERO), IVec3::ZERO);
 
             if vertex_buf.size() == 0 {
                 continue;
             }
 
-            let center = (location + 16).as_vec3();
+            let center = (location + 16 * REGION_LEN).as_vec3();
 
             for plane in planes {
                 let spherical_distance = center.dot(plane.truncate()) + plane.w;
@@ -787,7 +789,8 @@ impl Renderer {
         let Extent3d { width, height, .. } = self.frame.size();
         let aspect = width as f32 / height as f32;
         let projection = Mat4::perspective_rh(FOV, aspect, ZNEAR, ZFAR);
-        let xform = projection * Mat4::from(pov);
+        let xform = projection * pov.xform();
+        let location = location + pov.location();
         let time = self.epoch.elapsed().as_secs_f32();
 
         let mut pass = encoder.begin_render_pass(&descriptor);
@@ -864,7 +867,7 @@ impl Renderer {
     }
 }
 
-pub fn quad_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure: u8) -> QuadRef {
+pub fn quad_ref(offset: usize, location: IVec3, sky_exposure: u8) -> QuadRef {
     debug_assert!(sky_exposure < 16, "sky exposure out of bounds");
 
     let location = chunk::mask_block_loc(location);
@@ -874,11 +877,10 @@ pub fn quad_ref(offset: usize, location: IVec3, translucent: bool, sky_exposure:
         | (location.x as u64) << 32
         | (location.y as u64) << 37
         | (location.z as u64) << 42
-        | (translucent as u64) << 47
-        | (sky_exposure as u64) << 48
+        | (sky_exposure as u64) << 47
 }
 
-pub fn extend_quad_ref(quad_ref: &mut QuadRef, increment: IVec3) {
+pub fn extend_quad_ref(quad_ref: &mut QuadRef) {
     *quad_ref += 1 << 52;
 }
 

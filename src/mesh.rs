@@ -132,7 +132,7 @@ impl Mesher {
                     };
 
                     // Dumb meshing
-                    let quad_ref = render::quad_ref(idx, block_loc, translucent, sky_exposure);
+                    let quad_ref = render::quad_ref(idx, block_loc, sky_exposure);
                     mesh.push(quad_ref);
                 }
             }
@@ -249,10 +249,10 @@ impl Mesher {
                         // This is possible because faces are canonicalized at pack load time.
                         if last_face == Some((idx, sky_exposure)) {
                             let old_quad_ref = mesh.last_mut().unwrap();
-                            render::extend_quad_ref(old_quad_ref, Δblock);
+                            render::extend_quad_ref(old_quad_ref);
                         } else {
                             let quad_ref =
-                                render::quad_ref(idx, block_loc, translucent, sky_exposure);
+                                render::quad_ref(idx, block_loc, sky_exposure);
                             mesh.push(quad_ref);
                             last_face = Some((idx, sky_exposure));
                         }

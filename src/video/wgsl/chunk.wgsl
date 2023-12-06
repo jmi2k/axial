@@ -2,6 +2,7 @@ struct Push {
     xform: mat4x4f,
     location: vec3i,
     time: f32,
+    translucent: u32,
 };
 
 struct V2F {
@@ -10,9 +11,6 @@ struct V2F {
 
     @location(0)
     mapping: vec2f,
-
-    @location(1)
-    translucent: u32,
 
     @location(2)
     shade: f32,
@@ -64,7 +62,7 @@ var masks: texture_2d_array<f32>;
 var sanpler: sampler;
 
 @group(1) @binding(0)
-var<storage> quad_buf: array<QuadRef>;
+var<storage> qrefs: array<QuadRef>;
 
 var<push_constant> p: Push;
 
@@ -74,66 +72,79 @@ fn vert_main(
     instance_index: u32,
 
     @builtin(vertex_index)
-    vertex_index: u32,
+    vref_index: u32,
 ) -> V2F {
-    let qr = quad_buf[vertex_index / 6u];
+    // Indices to access buffers
+    let qref_index = vref_index / 6u;
+    let vertex_index_6 = vref_index % 6u;
+    // [0, 1, 2, 3, 2, 1] according to atlas' vertex order
+    let vertex_index = vertex_index_6
+        - 2u * u32(vertex_index_6 > 3u)
+        - 2u * u32(vertex_index_6 > 4u);
 
-    var index = vertex_index % 6u;
+    // Read face and vertex from buffers
+    let qref = qrefs[qref_index];
+    let vertex = vertex_atlas[4u * qref.offset + vertex_index];
 
-    if index == 4u {
-        index = 2u;
-    } else if index == 5u {
-        index = 1u;
-    }
+    // Decompress qref blob
+    // Chunk-relative coordinates
+    let bx = extractBits(qref.blob, 0u, 5u);
+    let by = extractBits(qref.blob, 5u, 5u);
+    let bz = extractBits(qref.blob, 10u, 5u);
+    // Face attributes
+    let sky_exposure = extractBits(qref.blob, 15u, 4u);
+    // 1D greedy mesh strip length
+    let strip_len = extractBits(qref.blob, 20u, 5u);
 
-    let va = vertex_atlas[4u * qr.offset + index];
-
-    var x = extractBits(qr.blob, 0u, 5u);
-    var y = extractBits(qr.blob, 5u, 5u);
-    var z = extractBits(qr.blob, 10u, 5u);
-    let translucent = extractBits(qr.blob, 15u, 1u);
-    let sky_exposure = extractBits(qr.blob, 16u, 4u);
-    let num_copies = extractBits(qr.blob, 20u, 5u);
-    var block_loc = vec3f(vec3u(x, y, z));
-
-    var mapping = vec2f(va.u, va.v);
-
-    // jmi2k: HACK!!!!
-    if index == 1u || index == 3u || index == 5u {
-        if va.nx == -1. {
-            block_loc.z += f32(num_copies);
-        } else if va.nx == 1. {
-            block_loc.y += f32(num_copies);
-        } else if va.ny == -1. {
-            block_loc.x += f32(num_copies);
-        } else if va.ny == 1. {
-            block_loc.z += f32(num_copies);
-        } else if va.nz == -1. {
-            block_loc.y += f32(num_copies);
-        } else if va.nz == 1. {
-            block_loc.x += f32(num_copies);
-        }
-
-        mapping.x += f32(num_copies);
-    }
-
+    // Decompress instance index
+    // Region-relative chunk coordinates
     let cx = extractBits(instance_index, 0u, 8u);
     let cy = extractBits(instance_index, 8u, 8u);
     let cz = extractBits(instance_index, 16u, 8u);
-    // jmi2k: suspicious of precision problems
-    let position = vec3f(32u * vec3u(cx, cy, cz)) + vec3f(va.x, va.y, va.z) + block_loc + vec3f(p.location);
-    let shade = max(0., dot(vec3f(abs(va.nx), abs(va.ny), va.nz), vec3f(0.5, 0.3, -0.6)));
+
+    // Decompress vertex
+    var position = vec3f(vertex.x, vertex.y, vertex.z);
+    var mapping = vec2f(vertex.u, vertex.v);
+    let normal = vec3f(vertex.nx, vertex.ny, vertex.nz);
+
+    // Block location given by combining all gathered data
+    var location = (
+        p.location                       // Premultiplied region location
+        + 32 * vec3i(vec3u(cx, cy, cz))  // Chunk location
+        + vec3i(vec3u(bx, by, bz))       // Block location
+    );
+
+    // Tweak vertices [1, 3, 5] to apply greedy meshing
+    if bool(vertex_index & 1u) {
+        if vertex.nx == -1. {
+            location.z += i32(strip_len);
+        } else if vertex.nx == 1. {
+            location.y += i32(strip_len);
+        } else if vertex.ny == -1. {
+            location.x += i32(strip_len);
+        } else if vertex.ny == 1. {
+            location.z += i32(strip_len);
+        } else if vertex.nz == -1. {
+            location.y += i32(strip_len);
+        } else if vertex.nz == 1. {
+            location.x += i32(strip_len);
+        }
+
+        mapping.x += f32(strip_len);
+    }
+
+    // jmi2k: precision issues, push integer camera position
+    position += vec3f(location);
 
     return V2F(
         p.xform * vec4f(position, 1.),
         mapping,
-        translucent,
-        shade,
+        shade(normal),
         light(sky_exposure, 1.75),
-        va.tile,
-        va.tint_mask,
-        vec3u(x, y, z),
-        vec3i(vec3f(va.nx, va.ny, va.nz)),
+        vertex.tile,
+        vertex.tint_mask,
+        vec3u(bx, by, bz),
+        vec3i(normal),
     );
 }
 
@@ -201,7 +212,7 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
     var color_sample = textureSampleGrad(tiles, sanpler, randomized_mapping, tile, dpdx(v.mapping), dpdy(v.mapping));
     var mask_sample = textureLoad(masks, vec2i(16.0 * randomized_mapping) % 16, v.tint_mask, 0);
 
-    if !bool(v.translucent) {
+    if !bool(p.translucent) {
         color_sample.a = select(0., 1., color_sample.a >= 0.5);
         if color_sample.a == 0. { discard; }
     }
@@ -214,6 +225,13 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
     let lit = shaded * vec4(vec3(v.sky_light), 1.);
     let fogged = lit; // jmi2k: todo
     return fogged;
+}
+
+fn shade(normal: vec3f) -> f32 {
+    let incidence = vec3f(abs(normal.xy), normal.z);
+    let weights = vec3f(0.5, 0.3, -0.6);
+
+    return max(0., dot(incidence, weights));
 }
 
 fn light(sky_exposure: u32, gamma: f32) -> f32 {
