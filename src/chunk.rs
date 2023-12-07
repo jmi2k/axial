@@ -12,7 +12,7 @@ static NONCE: AtomicU64 = AtomicU64::new(1);
 pub struct Chunk {
     nonces: SideMap<NonZeroU64>,
     num_blocks: u16,
-    heights: Box<Layer<i8, 32>>,
+    heights: Option<Box<Layer<i8, 32>>>,
     indices: Option<Box<Cube<i16, 32>>>,
 }
 
@@ -36,8 +36,10 @@ impl Chunk {
         let IVec3 { x, y, .. } = mask_block_loc(index.extend(0));
 
         unsafe {
+            let heights = self.heights.get_or_insert_with(|| Box::new_zeroed().assume_init());
+
             // Location is already masked into range
-            self.heights
+            heights
                 .get_unchecked_mut(y as usize)
                 .get_unchecked_mut(x as usize)
         }
@@ -78,7 +80,7 @@ impl Chunk {
         Self {
             nonces: SideMap::from_fn(|_| fresh_nonce()),
             num_blocks: 0,
-            heights: Box::new([[-1; 32]; 32]),
+            heights: None,
             indices: None,
         }
     }
@@ -94,10 +96,11 @@ impl Chunk {
     pub fn height(&self, index: IVec2) -> i8 {
         // jmi2k: hack
         let IVec3 { x, y, .. } = mask_block_loc(index.extend(0));
+        let Some(ref heights) = self.heights else { return 0; };
 
         unsafe {
             // Location is already masked into range
-            *self.heights
+            *heights
                 .get_unchecked(y as usize)
                 .get_unchecked(x as usize)
         }
@@ -111,8 +114,8 @@ impl Chunk {
         self.update_nonces(location);
 
         // jmi2k: be more specific with he kind of blocks influencing these fields
-        if block != 0 && self.height(height_loc) < z as i8 {
-            *self.height_mut(height_loc) = z as i8;
+        if block != 0 && self.height(height_loc) <= z as i8 {
+            *self.height_mut(height_loc) = 1 + z as i8;
         }
 
         self.num_blocks += (last_block != 0) as u16 - (block != 0) as u16;
@@ -127,10 +130,10 @@ impl Chunk {
 
         // jmi2k: be more specific with he kind of blocks influencing these fields
         if self.height(height_loc) == z as i8 {
-            *self.height_mut(height_loc) = (0..z)
+            *self.height_mut(height_loc) = (1..=z)
                 .rev()
-                .find(|h| self[IVec3::new(x, y, *h)] != 0)
-                .unwrap_or(-1) as i8;
+                .find(|h| self[IVec3::new(x, y, *h - 1)] != 0)
+                .unwrap_or_default() as i8;
         }
 
         self.num_blocks -= (last_block != 0) as u16;
@@ -153,7 +156,7 @@ impl Index<IVec3> for Chunk {
 
     fn index(&self, index: IVec3) -> &Self::Output {
         let IVec3 { x, y, z } = mask_block_loc(index);
-        let Some(indices) = self.indices.as_ref() else { return &0; };
+        let Some(ref indices) = self.indices else { return &0; };
 
         unsafe {
             // Location is already masked into range
