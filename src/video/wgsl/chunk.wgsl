@@ -66,13 +66,6 @@ var<storage> qrefs: array<QuadRef>;
 
 var<push_constant> p: Push;
 
-fn pcg(input: u32) -> u32 {
-    let state = input * 747796405u + 2891336453u;
-    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-
-    return (word >> 22u) ^ word;
-}
-
 @vertex
 fn vert_main(
     @builtin(instance_index)
@@ -123,17 +116,11 @@ fn vert_main(
 
     // Tweak vertices [1, 3, 5] to apply greedy meshing
     if bool(vertex_index & 1u) {
-        if vertex.nx == -1. {
+        if vertex.nx == -1. || vertex.ny == 1. {
             location.z += i32(strip_len);
-        } else if vertex.nx == 1. {
+        } else if vertex.nz == -1. || vertex.nx == 1. {
             location.y += i32(strip_len);
-        } else if vertex.ny == -1. {
-            location.x += i32(strip_len);
-        } else if vertex.ny == 1. {
-            location.z += i32(strip_len);
-        } else if vertex.nz == -1. {
-            location.y += i32(strip_len);
-        } else if vertex.nz == 1. {
+        } else if vertex.ny == -1. || vertex.nz == 1. {
             location.x += i32(strip_len);
         }
 
@@ -164,17 +151,11 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
     var y = v.location.y;
     var z = v.location.z;
 
-    if v.normal.x == -1 {
+    if v.normal.x == -1 || v.normal.y == 1 {
         z += copy_idx;
-    } else if v.normal.x == 1 {
+    } else if v.normal.z == -1 || v.normal.x == 1 {
         y += copy_idx;
-    } else if v.normal.y == -1 {
-        x += copy_idx;
-    } else if v.normal.y == 1 {
-        z += copy_idx;
-    } else if v.normal.z == -1 {
-        y += copy_idx;
-    } else if v.normal.z == 1 {
+    } else if v.normal.y == -1 || v.normal.z == 1 {
         x += copy_idx;
     }
 
@@ -221,15 +202,23 @@ fn frag_main(v: V2F) -> @location(0) vec4f {
     );
 
     // Apply tint based on the R channel — G and B are currently unused!
+    let biome_tint = vec4f(0.529, 0.741, 0.341, 1.);
     color_sample *= mix(
         vec4f(1.),
-        vec4f(0.529, 0.741, 0.341, 1.),
+        biome_tint,
         mask_sample.r,
     );
 
     let shaded = color_sample - vec4f(color_sample.xyz * v.shade, 0.);
     let lit = shaded * vec4(vec3(v.sky_light), 1.);
     return lit;
+}
+
+fn pcg(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+
+    return (word >> 22u) ^ word;
 }
 
 fn shade(normal: vec3f) -> f32 {
