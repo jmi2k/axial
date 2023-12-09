@@ -93,8 +93,9 @@ fn vert_main(
     let bz = extractBits(qref.blob, 10u, 5u);
     // Face attributes
     let sky_exposure = extractBits(qref.blob, 15u, 4u);
-    // 1D greedy mesh strip length
-    let strip_len = extractBits(qref.blob, 20u, 5u);
+    // Greedy mesh dimensions
+    let width = extractBits(qref.blob, 19u, 5u);
+    let height = extractBits(qref.blob, 24u, 5u);
 
     // Decompress instance index
     // Region-relative chunk coordinates
@@ -114,17 +115,42 @@ fn vert_main(
         + vec3i(vec3u(bx, by, bz))       // Block location
     );
 
-    // Tweak vertices [1, 3, 5] to apply greedy meshing
+    // Tweak vertices [1, 3, 5] to apply greedy meshing horizontally
     if bool(vertex_index & 1u) {
-        if vertex.nx == -1. || vertex.ny == 1. {
-            location.z += i32(strip_len);
-        } else if vertex.nz == -1. || vertex.nx == 1. {
-            location.y += i32(strip_len);
-        } else if vertex.ny == -1. || vertex.nz == 1. {
-            location.x += i32(strip_len);
+        if vertex.nx == -1. {
+            location.z += i32(width);
+        } else if vertex.nx == 1. {
+            location.y += i32(width);
+        } else if vertex.ny == -1. {
+            location.x += i32(width);
+        } else if vertex.ny == 1. {
+            location.z += i32(width);
+        } else if vertex.nz == -1. {
+            location.y += i32(width);
+        } else if vertex.nz == 1. {
+            location.x += i32(width);
         }
 
-        mapping.x += f32(strip_len);
+        mapping.x += f32(width);
+    }
+
+    // Tweak vertices [2, 3, 4] to apply greedy meshing horizontally
+    if vertex_index >= 2u && vertex_index <= 4u {
+        if vertex.nx == -1. {
+            location.y += i32(height);
+        } else if vertex.nx == 1. {
+            location.z += i32(height);
+        } else if vertex.ny == -1. {
+            location.z += i32(height);
+        } else if vertex.ny == 1. {
+            location.x += i32(height);
+        } else if vertex.nz == -1. {
+            location.x += i32(height);
+        } else if vertex.nz == 1. {
+            location.y += i32(height);
+        }
+
+        mapping.y -= f32(height);
     }
 
     position += vec3f(location);
@@ -145,18 +171,31 @@ fn vert_main(
 fn frag_main(v: V2F) -> @location(0) vec4f {
     let tile = u32(abs(v.tile)) - 1u;
     let mapping = fract(v.mapping);
-    let copy_idx = u32(abs(floor(v.mapping.x)));
+    let copy_idx_w = u32(abs(floor(v.mapping.x)));
+    let copy_idx_h = u32(abs(floor(v.mapping.y)));
     let randomize = v.tile < 0;
     var x = v.location.x;
     var y = v.location.y;
     var z = v.location.z;
 
-    if v.normal.x == -1 || v.normal.y == 1 {
-        z += copy_idx;
-    } else if v.normal.z == -1 || v.normal.x == 1 {
-        y += copy_idx;
-    } else if v.normal.y == -1 || v.normal.z == 1 {
-        x += copy_idx;
+    if v.normal.x == -1 {
+        z += copy_idx_w;
+        y += copy_idx_h;
+    } else if v.normal.x == 1 {
+        y += copy_idx_w;
+        z += copy_idx_h;
+    } else if v.normal.y == -1 {
+        x += copy_idx_w;
+        z += copy_idx_h;
+    } else if v.normal.y == 1 {
+        z += copy_idx_w;
+        x += copy_idx_h;
+    } else if v.normal.z == -1 {
+        y += copy_idx_w;
+        x += copy_idx_h;
+    } else if v.normal.z == 1 {
+        x += copy_idx_w;
+        y += copy_idx_h;
     }
 
     let random = u32(randomize) * pcg(x ^ 2u * y ^ 3u * z);

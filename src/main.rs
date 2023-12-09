@@ -170,7 +170,7 @@ async fn main() {
             }
 
             Action::Debug("toggle greedy meshing") => {
-                mesher.greedy_meshing = !mesher.greedy_meshing;
+                mesher.greedy_meshing = (mesher.greedy_meshing + 1) % 3;
                 renderer.invalidate_meshes();
             }
 
@@ -329,7 +329,7 @@ async fn main() {
             let (mesh, alpha_mesh) = mesher.mesh(&pack, &neighbor_chunks);
             renderer.load_mesh(&gfx, chunk_loc, &neighbor_nonces, mesh, alpha_mesh);
 
-            if then.elapsed() > Duration::from_micros(4500) {
+            if then.elapsed() > Duration::from_micros(3500) {
                 break;
             }
         }

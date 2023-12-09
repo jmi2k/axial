@@ -879,8 +879,12 @@ pub fn quad_ref(offset: usize, location: IVec3, sky_exposure: u8) -> QuadRef {
         | (sky_exposure as u64) << 47
 }
 
-pub fn extend_quad_ref(quad_ref: &mut QuadRef) {
-    *quad_ref += 1 << 52;
+pub fn extend_quad_ref_w(quad_ref: &mut QuadRef) {
+    *quad_ref += 1 << 51;
+}
+
+pub fn extend_quad_ref_h(quad_ref: &mut QuadRef) {
+    *quad_ref += 1 << 56;
 }
 
 fn build_frames(ctx: &Gfx) -> (Texture, Texture) {
