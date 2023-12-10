@@ -732,7 +732,7 @@ impl Renderer {
             xform.row(2),
         ];
 
-        let radius = f32::sqrt(3. * (32. + REGION_LEN as f32) * (32. * REGION_LEN as f32));
+        let radius = f32::sqrt(3. * (32. * REGION_LEN as f32) * (32. * REGION_LEN as f32));
 
         let solid_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.poly_chunk_pipeline };
         let alpha_pipeline = if wireframe { &self.wire_chunk_pipeline } else { &self.alpha_chunk_pipeline };
