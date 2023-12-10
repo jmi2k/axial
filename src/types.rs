@@ -132,7 +132,7 @@ impl<T> SideMap<T> {
         }
     }
 
-    pub fn map(self, mut cb: impl FnMut(T) -> T) -> Self {
+    pub fn map<U>(self, mut cb: impl FnMut(T) -> U) -> SideMap<U> {
         SideMap {
             west: cb(self.west),
             east: cb(self.east),
