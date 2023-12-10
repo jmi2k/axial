@@ -42,7 +42,7 @@ use winit::{
 };
 use world::World;
 
-const MAX_RENDER_DISTANCE: usize = 12;
+const MAX_RENDER_DISTANCE: usize = 16;
 const MAX_TICK_DISTANCE: usize = 4;
 const MAX_REACH: f32 = 10.;
 const TICK_DURATION: Duration = Duration::from_micros(31_250);
@@ -113,6 +113,7 @@ async fn main() {
     let mut mesher = Mesher::new();
     let mut generating = HashSet::new();
     let mut pladec_queue = ArrayVec::<bool, 16>::new();
+    let mut quick_remesh = ArrayVec::<IVec3, 16>::new();
     let mut selected_block = 1;
 
     let mut reached_face = None;
@@ -257,6 +258,8 @@ async fn main() {
                     } else {
                         world.destroy(location);
                     }
+                    let (chunk_loc, _) = chunk::split_loc(location);
+                    let _ = quick_remesh.try_push(chunk_loc);
                 }
             }
 
@@ -269,6 +272,49 @@ async fn main() {
         if !redraw {
             return;
         }
+
+        for chunk_loc in &quick_remesh {
+            let fine_loc = chunk::merge_loc(*chunk_loc, IVec3::ZERO);
+            let distance = pov.position.distance(fine_loc.as_vec3());
+            let max_distance = MAX_RENDER_DISTANCE as f32 * 32.;
+
+            // Unload far away chunks
+            if distance > max_distance {
+                continue;
+            }
+
+            // Early continue if there is no chunk
+            let Some(chunk) = world.chunk(*chunk_loc) else {
+                continue;
+            };
+
+            // Discard empty chunks immediately
+            if chunk.num_blocks() == 0 {
+                continue;
+            }
+
+            let neighbor_chunks = SideMap::from_fn(|side| {
+                let Δ = side.map(IVec3::from).unwrap_or(IVec3::ZERO);
+                world.chunk(*chunk_loc + Δ)
+            });
+
+            let neighbor_nonces = SideMap::from_fn(|side| {
+                let opposite_side = side.map(Neg::neg);
+                neighbor_chunks[side].map(|chunk| chunk.nonces()[opposite_side])
+            });
+
+            // Discard already meshed chunks immediately
+            if renderer.has_mesh(*chunk_loc, &neighbor_nonces) { continue; }
+
+            let (mesh, alpha_mesh) = mesher.mesh(&pack, &neighbor_chunks);
+            renderer.load_mesh(&gfx, *chunk_loc, &neighbor_nonces, mesh, alpha_mesh);
+
+            if then.elapsed() > Duration::from_micros(3500) {
+                break;
+            }
+        }
+
+        quick_remesh.clear();
 
         let then = Instant::now();
         let mut num_checked = 0;
