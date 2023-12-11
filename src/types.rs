@@ -153,6 +153,10 @@ impl<T> SideMap<T> {
             && pred(&self.down)
             && pred(&self.up)
     }
+
+    pub fn as_array(&self) -> &[T; mem::variant_count::<Direction>() + 1] {
+        unsafe { mem::transmute(self) }
+    }
 }
 
 // jmi2k: ugly...

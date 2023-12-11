@@ -1,5 +1,6 @@
-use std::{array, collections::HashMap, f32::consts::PI, iter, mem, time::Instant, num::NonZeroU64};
+use std::{array, collections::HashMap, f32::consts::PI, iter, mem, time::Instant, num::NonZeroU64, ops::Range};
 
+use arrayvec::ArrayVec;
 use glam::{IVec3, Mat4, Vec4, Vec3};
 use image::RgbaImage;
 use wgpu::{
@@ -19,7 +20,7 @@ use wgpu::{
     TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode, AddressMode, FilterMode, IndexFormat, BufferDescriptor,
 };
 
-use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction, Cube}};
+use crate::{asset::{Pack, MIP_LEVELS, TILE_LENGTH}, chunk, pov::Pov, world::World, types::{SideMap, Direction, Cube, SIDES}, mesh::Mesh};
 
 use super::Gfx;
 
@@ -98,17 +99,20 @@ pub type QuadRef = u64;
 #[derive(Default)]
 struct MeshRef {
     nonces: SideMap<Option<NonZeroU64>>,
-    offset: u32,
-    num_quads: u32,
+    ranges: SideMap<Range<u32>>,
 }
 
 impl MeshRef {
-    pub fn len(&self) -> u32 {
-        self.num_quads
+    pub fn start(&self) -> u32 {
+        self.ranges.west.start
     }
 
     pub fn end(&self) -> u32 {
-        self.offset + self.num_quads
+        self.ranges.none.end
+    }
+
+    pub fn len(&self) -> u32 {
+        self.end() - self.start()
     }
 }
 
@@ -118,6 +122,7 @@ struct Region {
     indirect_buf: Buffer,
     bind_group: BindGroup,
     num_indirects: u32,
+    indirect_scratch: Vec<DrawIndirectArgs>,
 }
 
 impl Region {
@@ -131,6 +136,7 @@ impl Region {
             indirect_buf: alloc_indirect_buf(ctx),
             bind_group,
             num_indirects: 0,
+            indirect_scratch: vec![],
         }
     }
 
@@ -172,14 +178,41 @@ impl Region {
     }
 
     fn write_indirects(&mut self, ctx: &Gfx) {
-        self.num_indirects = 0;
+        //ND-W
+        //  -WSD
+        //    SDE-
+        //     DE-N
+        //      E-NU
+        //       -NUW
+        //         UW-S
+        //            SEU-
+
+        let indirect_sides = [
+            Some(Direction::North),
+            Some(Direction::Down),
+            None,
+            Some(Direction::West),
+            Some(Direction::South),
+            Some(Direction::Down),
+            Some(Direction::East),
+            None,
+            Some(Direction::North),
+            Some(Direction::Up),
+            Some(Direction::West),
+            None,
+            Some(Direction::Up),
+            Some(Direction::South),
+            Some(Direction::East),
+        ];
+
+        self.indirect_scratch.clear();
 
         for z in 0..REGION_LEN {
         for y in 0..REGION_LEN {
         for x in 0..REGION_LEN {
             let mesh = self.mesh(IVec3 { x, y, z });
 
-            if mesh.num_quads == 0 {
+            if mesh.len() == 0 {
                 continue;
             }
 
@@ -191,37 +224,40 @@ impl Region {
             ]);
 
             let indirect = DrawIndirectArgs {
-                vertex_count: 6 * mesh.num_quads,
+                vertex_count: 6 * mesh.len(),
                 instance_count: 1,
-                first_vertex: 6 * mesh.offset,
+                first_vertex: 6 * mesh.start(),
                 first_instance: instance,
             };
 
-            ctx.queue.write_buffer(&self.indirect_buf, (self.num_indirects as usize * mem::size_of::<DrawIndirectArgs>()) as u64, indirect.as_bytes());
-            self.num_indirects += 1;
+            self.indirect_scratch.push(indirect);
         }
         }
         }
+
+        let blob = unsafe { mem::transmute::<_, &[[u32; 4]]>(self.indirect_scratch.as_slice()) };
+        ctx.queue.write_buffer(&self.indirect_buf, 0, bytemuck::cast_slice(blob));
+        self.num_indirects = self.indirect_scratch.len() as _;
     }
 
-    fn load(&mut self, ctx: &Gfx, layout: &BindGroupLayout, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], transient_buf: &mut Buffer) {
+    fn load(&mut self, ctx: &Gfx, layout: &BindGroupLayout, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, mesh: Mesh, transient_buf: &mut Buffer) {
         const Q: u64 = mem::size_of::<QuadRef>() as u64;
 
         let location = mask_chunk_loc(location);
         let old_len = self.len();
-        let mesh = self.mesh_mut(location);
-        let Δlen = quads.len() as u32 - mesh.len();
-        let old_mesh_end = mesh.end();
-        let old_mesh_offset = mesh.offset;
-        let num_quads_left = mesh.offset;
-        let num_quads_right = old_len - mesh.end();
+        let mesh_ref = self.mesh_mut(location);
+        let Δlen = mesh.quads.len() as u32 - mesh_ref.len();
+        let old_mesh_end = mesh_ref.end();
+        let old_mesh_offset = mesh_ref.start();
+        let num_quads_left = mesh_ref.start();
+        let num_quads_right = old_len - mesh_ref.end();
 
         // Adjust mesh reference
-        mesh.num_quads = quads.len() as _;
-        mesh.nonces = nonces.clone();
+        mesh_ref.nonces = nonces.clone();
+        mesh_ref.ranges = mesh.ranges.clone().map(|range| range.start + num_quads_left .. range.end + num_quads_left);
 
         // Ignore no-ops on empty meshes
-        if quads.is_empty() && Δlen == 0 {
+        if mesh.quads.is_empty() && Δlen == 0 {
             return;
         }
 
@@ -285,14 +321,17 @@ impl Region {
         ctx.queue.write_buffer(
             &self.vertex_buf,
             old_mesh_offset as u64 * Q,
-            bytemuck::cast_slice(quads));
+            bytemuck::cast_slice(mesh.quads));
 
         let flattened_meshes = self.meshes.flatten_mut().flatten_mut();
         let start = location.z * REGION_LEN * REGION_LEN + location.y * REGION_LEN + location.x + 1;
 
         // Adjust right offsets
         for mesh in &mut flattened_meshes[start as usize..] {
-            mesh.offset += Δlen;
+            for side in SIDES {
+                mesh.ranges[side].start += Δlen;
+                mesh.ranges[side].end += Δlen;
+            }
         }
 
         self.write_indirects(ctx);
@@ -668,10 +707,10 @@ impl Renderer {
     }
 
     // jmi2k: accept a closure instead?
-    pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, quads: &[QuadRef], alpha_quads: &[QuadRef]) {
+    pub fn load_mesh(&mut self, ctx: &Gfx, location: IVec3, nonces: &SideMap<Option<NonZeroU64>>, solid_mesh: Mesh, alpha_mesh: Mesh) {
         let (region_loc, chunk_loc) = split_loc(location);
         let region = self.loaded_regions.entry(region_loc).or_insert_with(|| Region::new(ctx, &self.region_layout));
-        region.load(ctx, &self.region_layout, chunk_loc, nonces, quads, &mut self.transient_buf);
+        region.load(ctx, &self.region_layout, chunk_loc, nonces, solid_mesh, &mut self.transient_buf);
     }
 
     pub fn unload_mesh(&mut self, location: IVec3) {

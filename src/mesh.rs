@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use glam::IVec3;
 
 use crate::{
@@ -18,19 +20,22 @@ const TRAVERSAL_ORDER: SideMap<(IVec3, IVec3, IVec3)> = SideMap {
     none:  (IVec3::Z, IVec3::Y, IVec3::X),
 };
 
-pub struct Mesher {
-    pub greedy_meshing: usize,
+#[derive(Default)]
+pub struct Mesh<'q> {
+    pub quads: &'q [QuadRef],
+    pub ranges: SideMap<Range<u32>>,
+}
 
-    solid_mesh: Vec<QuadRef>,
-    alpha_mesh: Vec<QuadRef>,
+pub struct Mesher {
+    solid_quads: Vec<QuadRef>,
+    alpha_quads: Vec<QuadRef>,
 }
 
 impl Mesher {
     pub fn new() -> Self {
         Self {
-            greedy_meshing: 0,
-            solid_mesh: vec![],
-            alpha_mesh: vec![],
+            solid_quads: vec![],
+            alpha_quads: vec![],
         }
     }
 
@@ -38,20 +43,7 @@ impl Mesher {
         &mut self,
         pack: &Pack,
         chunks: &SideMap<Option<&Chunk>>,
-    ) -> (&[QuadRef], &[QuadRef]) {
-        match self.greedy_meshing {
-            0 => self.mesh_greedy_2d(pack, chunks),
-            1 => self.mesh_greedy_1d(pack, chunks),
-            2 => self.mesh_dumb(pack, chunks),
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn mesh_dumb(
-        &mut self,
-        pack: &Pack,
-        chunks: &SideMap<Option<&Chunk>>,
-    ) -> (&[QuadRef], &[QuadRef]) {
+    ) -> (Mesh<'_>, Mesh<'_>) {
         // Discard unloaded chunks
         let Some(chunk) = chunks.none else {
             return Default::default();
@@ -67,8 +59,8 @@ impl Mesher {
             return Default::default();
         }
 
-        self.solid_mesh.clear();
-        self.alpha_mesh.clear();
+        self.solid_quads.clear();
+        self.alpha_quads.clear();
 
         let models = [
             None,
@@ -85,113 +77,17 @@ impl Mesher {
             pack.model("leaves"),
         ];
 
-        for side in SIDES {
-            for x in 0..32 {
-            for y in 0..32 {
-            for z in 0..32 {
-                // Traverse chunk following the current side's canonical order
-                let block_loc = IVec3::new(x, y, z);
-                let block = chunk[block_loc];
-
-                // Skip invisible blocks
-                let Some(model) = models[block as usize] else {
-                    continue;
-                };
-
-                // Skip empty faces
-                let Some(range) = model.ranges[side].as_ref() else {
-                    continue;
-                };
-
-                let translucent = (6..=7).contains(&block);
-
-                // jmi2k: ugly...
-                let neighbor = side.map_or(0, |direction| {
-                    let neighbor_loc = block_loc + IVec3::from(direction);
-                    let block_loc = chunk::mask_block_loc(neighbor_loc);
-
-                    match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
-                        (-1, _) | (_, 32) => {
-                            chunks[side].map(|chunk| chunk[block_loc]).unwrap_or(0)
-                        }
-                        _ => chunk[block_loc],
-                    }
-                });
-
-                let culled = side.is_some()
-                    && ((1..=3).contains(&neighbor)
-                        || ((6..=7).contains(&block) && (6..=7).contains(&neighbor))
-                        || (9..=11).contains(&neighbor));
-
-                // Skip hidden faces
-                if culled {
-                    continue;
-                }
-
-                for idx in range.clone() {
-                    let sky_exposure = 15;
-                    let mesh = if translucent {
-                        &mut self.alpha_mesh
-                    } else {
-                        &mut self.solid_mesh
-                    };
-
-                    // Dumb meshing
-                    let quad_ref = render::quad_ref(idx, block_loc, sky_exposure);
-                    mesh.push(quad_ref);
-                }
-            }
-            }
-            }
-        }
-
-        (&self.solid_mesh, &self.alpha_mesh)
-    }
-
-    pub fn mesh_greedy_1d(
-        &mut self,
-        pack: &Pack,
-        chunks: &SideMap<Option<&Chunk>>,
-    ) -> (&[QuadRef], &[QuadRef]) {
-        // Discard unloaded chunks
-        let Some(chunk) = chunks.none else {
-            return Default::default();
-        };
-
-        // Discard empty chunks immediately
-        if chunk.num_blocks() == 0 {
-            return Default::default();
-        }
-
-        // Discard enclosed chunks immediately
-        if chunks.all(|entry| entry.map(Chunk::num_blocks) == Some(32_768)) {
-            return Default::default();
-        }
-
-        self.solid_mesh.clear();
-        self.alpha_mesh.clear();
-
-        let models = [
-            None,
-            pack.model("grass"),
-            pack.model("dirt"),
-            pack.model("stone"),
-            pack.model("wheat_0"),
-            pack.model("wheat"),
-            pack.model("water"),
-            pack.model("water_surface"),
-            pack.model("glass"),
-            pack.model("sand"),
-            pack.model("wood"),
-            pack.model("leaves"),
-        ];
+        let mut solid_ranges = SideMap::<Range<_>>::default();
+        let mut alpha_ranges = SideMap::<Range<_>>::default();
 
         for side in SIDES {
+            solid_ranges[side].start = self.solid_quads.len() as u32;
+            alpha_ranges[side].start = self.alpha_quads.len() as u32;
             let (Δlayer, Δrow, Δblock) = TRAVERSAL_ORDER[side];
 
             for a in 0..32 {
-                let base_solid = self.solid_mesh.len();
-                let base_alpha = self.alpha_mesh.len();
+                let base_solid = self.solid_quads.len() as u32;
+                let base_alpha = self.alpha_quads.len() as u32;
 
                 for b in 0..32 {
                     let mut last_face = None;
@@ -242,134 +138,9 @@ impl Mesher {
                         for idx in range.clone() {
                             let sky_exposure = 15;
                             let mesh = if translucent {
-                                &mut self.alpha_mesh
+                                &mut self.alpha_quads
                             } else {
-                                &mut self.solid_mesh
-                            };
-
-                            // Simple inline 1D greedy meshing.
-                            //
-                            // This code will fail to optimize sides with more than 1 quad,
-                            // but this is an acceptable limitation
-                            // as those should not be optimized anyway.
-                            //
-                            // The face extension is done at the reference level.
-                            // This is possible because faces are canonicalized at pack load time.
-                            if last_face == Some((idx, sky_exposure)) {
-                                let old_quad_ref = mesh.last_mut().unwrap();
-                                render::extend_quad_ref_w(old_quad_ref);
-                            } else {
-                                let quad_ref =
-                                    render::quad_ref(idx, block_loc, sky_exposure);
-                                mesh.push(quad_ref);
-                                last_face = Some((idx, sky_exposure));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        (&self.solid_mesh, &self.alpha_mesh)
-    }
-
-    pub fn mesh_greedy_2d(
-        &mut self,
-        pack: &Pack,
-        chunks: &SideMap<Option<&Chunk>>,
-    ) -> (&[QuadRef], &[QuadRef]) {
-        // Discard unloaded chunks
-        let Some(chunk) = chunks.none else {
-            return Default::default();
-        };
-
-        // Discard empty chunks immediately
-        if chunk.num_blocks() == 0 {
-            return Default::default();
-        }
-
-        // Discard enclosed chunks immediately
-        if chunks.all(|entry| entry.map(Chunk::num_blocks) == Some(32_768)) {
-            return Default::default();
-        }
-
-        self.solid_mesh.clear();
-        self.alpha_mesh.clear();
-
-        let models = [
-            None,
-            pack.model("grass"),
-            pack.model("dirt"),
-            pack.model("stone"),
-            pack.model("wheat_0"),
-            pack.model("wheat"),
-            pack.model("water"),
-            pack.model("water_surface"),
-            pack.model("glass"),
-            pack.model("sand"),
-            pack.model("wood"),
-            pack.model("leaves"),
-        ];
-
-        for side in SIDES {
-            let (Δlayer, Δrow, Δblock) = TRAVERSAL_ORDER[side];
-
-            for a in 0..32 {
-                let base_solid = self.solid_mesh.len();
-                let base_alpha = self.alpha_mesh.len();
-
-                for b in 0..32 {
-                    let mut last_face = None;
-
-                    for c in 0..32 {
-                        // Traverse chunk following the current side's canonical order
-                        let block_loc = a * Δlayer + b * Δrow + c * Δblock;
-                        let block = chunk[block_loc];
-
-                        // Skip invisible blocks
-                        let Some(model) = models[block as usize] else {
-                            last_face = None;
-                            continue;
-                        };
-
-                        // Skip empty faces
-                        let Some(range) = model.ranges[side].as_ref() else {
-                            last_face = None;
-                            continue;
-                        };
-
-                        let translucent = (6..=7).contains(&block);
-
-                        // jmi2k: ugly...
-                        let neighbor = side.map_or(0, |direction| {
-                            let neighbor_loc = block_loc + IVec3::from(direction);
-                            let block_loc = chunk::mask_block_loc(neighbor_loc);
-
-                            match (neighbor_loc.min_element(), neighbor_loc.max_element()) {
-                                (-1, _) | (_, 32) => {
-                                    chunks[side].map(|chunk| chunk[block_loc]).unwrap_or(0)
-                                }
-                                _ => chunk[block_loc],
-                            }
-                        });
-
-                        let culled = side.is_some()
-                            && ((1..=3).contains(&neighbor)
-                                || ((6..=7).contains(&block) && (6..=7).contains(&neighbor))
-                                || (9..=11).contains(&neighbor));
-
-                        // Skip hidden faces
-                        if culled {
-                            last_face = None;
-                            continue;
-                        }
-
-                        for idx in range.clone() {
-                            let sky_exposure = 15;
-                            let mesh = if translucent {
-                                &mut self.alpha_mesh
-                            } else {
-                                &mut self.solid_mesh
+                                &mut self.solid_quads
                             };
 
                             // Simple inline 1D greedy meshing.
@@ -400,10 +171,10 @@ impl Mesher {
                 //
                 // The face extension is done at the reference level.
                 // This is possible because faces are canonicalized at pack load time.
-                for (base, mesh) in [(base_solid, &mut self.solid_mesh), (base_alpha, &mut self.alpha_mesh)] {
-                    let mut dest = base;
-                    let mut back = base;
-                    let mut lead = base;
+                for (base, mesh) in [(base_solid, &mut self.solid_quads), (base_alpha, &mut self.alpha_quads)] {
+                    let mut dest = base as usize;
+                    let mut back = base as usize;
+                    let mut lead = base as usize;
 
                     let xo = match direction {
                         Direction::West => 42,
@@ -470,8 +241,21 @@ impl Mesher {
                     mesh.truncate(dest);
                 }
             }
+
+            solid_ranges[side].end = self.solid_quads.len() as u32;
+            alpha_ranges[side].end = self.alpha_quads.len() as u32;
         }
 
-        (&self.solid_mesh, &self.alpha_mesh)
+        let solid_mesh = Mesh {
+            quads: &self.solid_quads,
+            ranges: solid_ranges,
+        };
+
+        let alpha_mesh = Mesh {
+            quads: &self.alpha_quads,
+            ranges: alpha_ranges,
+        };
+
+        (solid_mesh, alpha_mesh)
     }
 }
